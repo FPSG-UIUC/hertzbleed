@@ -1,0 +1,98 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# Binaries / Object files
+bin
+obj
+
+# Outputs
+data*
+out*
+plot
+
+# Compiled values
+*-monitor
+
+# Python virtual env
+venv3
+venv
+
+# Other stuff
+*.pyc
+
+# SGX generated
+*_u.c
+*_u.h
+*_t.c
+*_t.h
+.config_HW_DEBUG_x64
+app
+!app/
+
+poc
+!poc/
+poc_*
+!poc_*/
+test
+!test/
+input.txt
+
+perf.txt
+
+sike_local
+sike_server
+sike_client
+
+bit_recovered.txt
+
+circl/
