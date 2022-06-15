@@ -55,4 +55,4 @@ If you make any use of this code for academic purposes, please cite the paper:
 }
 ```
 
-[paper]: https://www.hertzbleed.com/hertzlbeed.pdf
+[paper]: https://www.hertzbleed.com/hertzbleed.pdf
