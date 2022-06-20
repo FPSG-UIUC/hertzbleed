@@ -120,7 +120,7 @@ Our `sike_client.go` can send decapsulation requests to the server and it takes 
 `sike_client`:
    1. If `request_count`==0, the sike_client will send the SECRET command to the server asking it to reveal the secret.
    2. If `iterations`==0, The `sike_client` should already have discovered enough bits of secret key and decided to bruteforce the rest of the unrecovered secret key bits by confirming with the public key. We recommend you to start bruteforcing after extracting ~365 number of secret key bits. After extracting the full secret key, the `sike_client` will confirm the recovered secret key by sending the SHUT command to the server asking it to reveal the secret and terminate itself.
-   3. Otherwise, it will send `request_count` number of requests and print the total responce time. Repeat the attack for `iterations`.
+   3. Otherwise, it will send `request_count` number of requests and print the total response time. Repeat the attack for `iterations`.
 
 
 ## Remote attack: Attack Setup 
