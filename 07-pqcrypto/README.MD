@@ -117,7 +117,7 @@ Our `tests/test_SIKE_CLIENT.c` can send decapsulation requests to the server and
    4. `filename`: the file contains the already recovered key. The format of this file should be: one bit a line with no extra information.
     
 `test_SIKE_CLIENT`:
-   1. Everytime we run the `test_SIKE_CLIENT`, it will first send PUB command to the server asking for public key.
+   1. Every time we run the `test_SIKE_CLIENT`, it will first send PUB command to the server asking for public key.
    2. If `connection==0`, the `test_SIKE_CLIENT` will send the SECRET command to the server asking it to reveal the secret.
    3. If `iteration==0`, The `test_SIKE_CLIENT` discovered enough bits of secret key and decided to bruteforce the rest of the unrecovered secret key bits by confirming with the public key. We recommend you to start bruteforcing after extracting ~365 number of secret key bits. After extracting the full secret key, the `test_SIKE_CLIENT` will confirm the recovered secret key by sending the SECRET command to the server asking it to reveal the secret.
    4. Otherwise, it will send `connection` number of requests and print the total response time. Repeat the attack for `iteration`.
