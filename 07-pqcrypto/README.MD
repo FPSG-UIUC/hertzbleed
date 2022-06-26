@@ -117,7 +117,7 @@ Our `tests/test_SIKE_CLIENT.c` can send decapsulation requests to the server and
    4. `filename`: the file contains the already recovered key. The format of this file should be: one bit a line with no extra information.
     
 `test_SIKE_CLIENT`:
-   1. Everytime we run the `test_SIKE_CLIENT`, it will first send PUB command to the server asking for public key.
+   1. Every time we run the `test_SIKE_CLIENT`, it will first send PUB command to the server asking for public key.
    2. If `connection==0`, the `test_SIKE_CLIENT` will send the SECRET command to the server asking it to reveal the secret.
    3. If `iteration==0`, The `test_SIKE_CLIENT` discovered enough bits of secret key and decided to bruteforce the rest of the unrecovered secret key bits by confirming with the public key. We recommend you to start bruteforcing after extracting ~365 number of secret key bits. After extracting the full secret key, the `test_SIKE_CLIENT` will confirm the recovered secret key by sending the SECRET command to the server asking it to reveal the secret.
    4. Otherwise, it will send `connection` number of requests and print the total responce time. Repeat the attack for `iteration`.
@@ -195,7 +195,7 @@ done
 
    2. In `data.py`, modify low and high as determined in step 4 above. low and high are for excluding outliers.
 
-   3. In `data.py`, modify `repeat_high` = (time(`m[i]` == `m[i-1]`) - `epsilon`), and `repeat_low` = (time(`m[i]` != `m[i-1]`) + `epsilon`). (`repeat_low`, `repeat_high`) are for thresholding. If the median of iterations falls into (`repeat_low`, `repeat_high`) we want to repeat the experiment because the result is inconclusive. If the median is below `repeat_low`, we claim that we see the speedup and `m[i]` != `m[i-1]`. If the median is above `repeat_high`, we claim that we do not see the speedup and `m[i]` == `m[i-1]`. We compute the new bit `m[i]` based on `m[i-1]` and append it to `bit_recovered.txt`. Value of `epsilon` should be tuned empiracally. 
+   3. In `data.py`, modify `repeat_high` = (time(`m[i]` == `m[i-1]`) - `epsilon`), and `repeat_low` = (time(`m[i]` != `m[i-1]`) + `epsilon`). (`repeat_low`, `repeat_high`) are for thresholding. If the median of iterations falls into (`repeat_low`, `repeat_high`) we want to repeat the experiment because the result is inconclusive. If the median is below `repeat_low`, we claim that we see the speedup and `m[i]` != `m[i-1]`. If the median is above `repeat_high`, we claim that we do not see the speedup and `m[i]` == `m[i-1]`. We compute the new bit `m[i]` based on `m[i-1]` and append it to `bit_recovered.txt`. Value of `epsilon` should be tuned empirically.
 
     4. Create `attack.sh` and run it.
 ```sh

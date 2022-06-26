@@ -199,7 +199,7 @@ done
 ```
    2. In `data.py`, modify low and high as determined in step 4 above. low and high are for excluding outliers.
 
-   3. In `data.py`, modify `repeat_high` = (time(`m[i]` == `m[i-1]`) - `epsilon`), and `repeat_low` = (time(`m[i]` != `m[i-1]`) + `epsilon`). (`repeat_low`, `repeat_high`) are for thresholding. If the median of iterations falls into (`repeat_low`, `repeat_high`) we want to repeat the experiment because the result is inconclusive. If the median is below `repeat_low`, we claim that we see the speedup and `m[i]` != `m[i-1]`. If the median is above `repeat_high`, we claim that we do not see the speedup and `m[i]` == `m[i-1]`. We compute the new bit `m[i]` based on `m[i-1]` and append it to `bit_recovered.txt`. Value of `epsilon` should be tuned empiracally. 
+   3. In `data.py`, modify `repeat_high` = (time(`m[i]` == `m[i-1]`) - `epsilon`), and `repeat_low` = (time(`m[i]` != `m[i-1]`) + `epsilon`). (`repeat_low`, `repeat_high`) are for thresholding. If the median of iterations falls into (`repeat_low`, `repeat_high`) we want to repeat the experiment because the result is inconclusive. If the median is below `repeat_low`, we claim that we see the speedup and `m[i]` != `m[i-1]`. If the median is above `repeat_high`, we claim that we do not see the speedup and `m[i]` == `m[i-1]`. We compute the new bit `m[i]` based on `m[i-1]` and append it to `bit_recovered.txt`. Value of `epsilon` should be tuned empirically.
 
    4. Create `attack.sh` and run it.
 ```sh
